@@ -1,0 +1,56 @@
+name: dtbld mido kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: jamet320/android_kernel_xiaomi_mido
+          ref: lineage-22.2
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            bc \
+            bison \
+            build-essential \
+            flex \
+            gcc-aarch64-linux-gnu \
+            libssl-dev \
+            libelf-dev \
+            python3 \
+            rsync
+
+      - name: Setup clang
+        run: |
+          git clone --depth=1 \
+            https://github.com/kdrag0n/proton-clang \
+            clang
+
+      - name: Build kernel
+        run: |
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+
+          make O=out ARCH=arm64 mido_defconfig
+
+          make -j$(nproc) \
+            O=out \
+            ARCH=arm64 \
+            CC=clang \
+            LLVM=1
+
+      - name: Upload kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: mido-kernel
+          path: |
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/dts/qcom/*.dtb
