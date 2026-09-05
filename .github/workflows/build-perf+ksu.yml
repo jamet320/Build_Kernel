@@ -7,6 +7,9 @@ jobs:
   build:
     runs-on: ubuntu-22.04
 
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -17,11 +20,24 @@ jobs:
 
       - name: Install apt deps
         run: |
+          set -eux
+
           sudo apt update
+
           sudo apt install -y \
-            bc bison build-essential flex gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi libssl-dev libelf-dev python3 \
-            rsync unzip ccache device-tree-compiler
+            bc \
+            bison \
+            build-essential \
+            flex \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            libssl-dev \
+            libelf-dev \
+            python3 \
+            rsync \
+            unzip \
+            ccache \
+            device-tree-compiler
 
       - name: Download backslashxx KernelSU
         run: |
@@ -31,8 +47,9 @@ jobs:
             https://github.com/backslashxx/KernelSU \
             KernelSU
 
-          echo "=== KernelSU ==="
+          echo "=== KernelSU repository ==="
           ls -la KernelSU
+
           echo "=== KernelSU kernel ==="
           ls -la KernelSU/kernel
 
@@ -44,18 +61,23 @@ jobs:
 
           echo "=== Kernel source ==="
           pwd
-          test -d drivers
-          test -f Makefile
 
-          echo "=== KernelSU setup ==="
+          test -f Makefile
+          test -d drivers
+
+          echo "=== Running KernelSU setup ==="
           ./KernelSU/kernel/setup.sh
 
           echo "=== KernelSU integration check ==="
+
           test -d drivers/kernelsu
+
           ls -la drivers/kernelsu
 
           echo "=== CONFIG_KSU references ==="
-          grep -Rni "CONFIG_KSU" drivers/kernelsu | head -20 || true
+          grep -Rni "CONFIG_KSU" \
+            drivers/kernelsu \
+            | head -30 || true
 
       - name: Download proton-clang
         run: |
@@ -68,28 +90,36 @@ jobs:
           fi
 
           echo "=== Proton Clang ==="
+
           ls -la clang/bin
+
           clang/bin/clang --version | head -n1
 
       - name: Prepare ccache
         run: |
           set -eux
 
-          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
-
           mkdir -p "$CCACHE_DIR"
 
           ccache --max-size=10G
 
+          ccache --zero-stats
+
+          echo "=== Configure PATH ==="
+
+          echo "$GITHUB_WORKSPACE/clang/bin" >> "$GITHUB_PATH"
+
           if [ -d /usr/lib/ccache ]; then
-            echo "/usr/lib/ccache"
             echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           elif [ -d /usr/lib64/ccache ]; then
-            echo "/usr/lib64/ccache"
             echo "/usr/lib64/ccache" >> "$GITHUB_PATH"
           fi
 
-          echo "$GITHUB_WORKSPACE/clang/bin" >> "$GITHUB_PATH"
+          echo "=== ccache version ==="
+          ccache --version
+
+          echo "=== ccache before build ==="
+          ccache -s
 
       - name: Cache ccache directory
         uses: actions/cache@v4
@@ -112,14 +142,28 @@ jobs:
           export CC="ccache clang"
           export HOSTCC="ccache gcc"
 
-          echo "=== Kernel config ==="
+          echo "=== Compiler ==="
 
-          make O=out \
+          which clang
+          clang --version | head -n1
+
+          echo "=== ccache ==="
+
+          which ccache
+          ccache --version
+
+          echo "=== Kernel defconfig ==="
+
+          make \
+            O=out \
             ARCH=arm64 \
             mido_defconfig
 
-          echo "=== Check KSU config ==="
-          grep -E 'CONFIG_KSU|KSU' out/.config || true
+          echo "=== KSU config after defconfig ==="
+
+          grep -E \
+            '^(CONFIG_KSU|CONFIG_KSU_)' \
+            out/.config || true
 
       - name: Build kernel
         env:
@@ -140,13 +184,15 @@ jobs:
             O=out \
             ARCH=arm64 \
             CC="$CC" \
+            HOSTCC="$HOSTCC" \
             LLVM=1 \
             CROSS_COMPILE="$CROSS_COMPILE" \
             CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
 
       - name: ccache stats
         run: |
-          ccache -s || true
+          echo "=== Final ccache statistics ==="
+          ccache -s
 
       - name: Produce Image.gz-dtb
         run: |
@@ -173,13 +219,21 @@ jobs:
             | head -n1 || true)
 
           if [ -z "$DTB" ]; then
-            echo "DTB not found."
-            echo "=== DTS directory ==="
-            find "$OUT/dts" -maxdepth 3 -type f | head -100 || true
+            echo "ERROR: mido DTB not found."
+
+            echo "=== Available DTBs ==="
+
+            find "$OUT/dts" \
+              -type f \
+              -name '*.dtb' \
+              -print \
+              | head -100 || true
+
             exit 1
           fi
 
-          echo "DTB: $DTB"
+          echo "Using DTB:"
+          echo "$DTB"
 
           echo "=== Create Image.gz-dtb ==="
 
@@ -189,7 +243,11 @@ jobs:
             > "$OUT/Image.gz-dtb"
 
           echo "=== Final kernel ==="
-          ls -lh "$OUT/Image.gz-dtb"
+
+          ls -lh \
+            "$OUT/Image" \
+            "$OUT/Image.gz" \
+            "$OUT/Image.gz-dtb"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
