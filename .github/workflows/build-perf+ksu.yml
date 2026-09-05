@@ -1,0 +1,144 @@
+name: Build mido kernel perf4.9 + XXKSU
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          repository: jamet320/kernel_xiaomi_msm8953-4.9
+          ref: lineage-17.1
+          fetch-depth: 0
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            bc bison build-essential flex gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi libssl-dev libelf-dev python3 \
+            rsync unzip ccache device-tree-compiler
+
+      - name: Download backslashxx KernelSU
+        run: |
+          git clone --depth=1 https://github.com/backslashxx/KernelSU KernelSU
+          ls -la KernelSU
+          ls -la KernelSU/kernel
+
+      - name: Integrate backslashxx KernelSU
+        run: |
+          set -eux
+
+          # Integrate KernelSU into the 4.9 kernel source
+          cd KernelSU/kernel
+          ./setup.sh "$GITHUB_WORKSPACE"
+
+          cd "$GITHUB_WORKSPACE"
+
+          echo "=== KernelSU integration check ==="
+          test -d drivers/kernelsu
+          ls -la drivers/kernelsu
+
+          echo "=== KernelSU references ==="
+          grep -Rni "CONFIG_KSU" drivers/kernelsu | head -20 || true
+
+      - name: Download proton-clang (shallow)
+        run: |
+          if [ ! -d clang ]; then
+            git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
+          fi
+          ls -la clang/bin
+
+      - name: Prepare ccache dir and add wrappers
+        run: |
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+          mkdir -p "$CCACHE_DIR"
+          ccache --max-size=10G
+
+          if [ -d /usr/lib/ccache ]; then
+            export PATH="/usr/lib/ccache:$PATH"
+          elif [ -d /usr/lib64/ccache ]; then
+            export PATH="/usr/lib64/ccache:$PATH"
+          fi
+
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+
+          echo "PATH=$PATH"
+          which clang || true
+          clang --version | head -n1 || true
+
+      - name: Cache ccache directory
+        uses: actions/cache@v4
+        with:
+          path: ./.ccache
+          key: ccache-mido-${{ runner.os }}-${{ matrix.compiler || 'clang' }}
+          restore-keys: |
+            ccache-mido-${{ runner.os }}-
+
+      - name: Configure and build
+        env:
+          ARCH: arm64
+          CROSS_COMPILE: aarch64-linux-gnu-
+          CROSS_COMPILE_ARM32: arm-linux-gnueabi-
+        run: |
+          set -eux
+
+          export PATH="$GITHUB_WORKSPACE/clang/bin:/usr/lib/ccache:$PATH"
+          export CC="ccache clang"
+          export HOSTCC="ccache gcc"
+
+          # Ensure KSU is enabled in the defconfig
+          make O=out mido_defconfig
+
+          scripts/config --file out/.config \
+            -e CONFIG_KSU
+
+          make O=out olddefconfig
+
+          echo "=== KSU config ==="
+          grep -E '^CONFIG_KSU=' out/.config || true
+
+          # Build kernel
+          make -j$(nproc) \
+            O=out \
+            ARCH=arm64 \
+            CC="$CC" \
+            LLVM=1 \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            CROSS_COMPILE_ARM32=$CROSS_COMPILE
+
+      - name: ccache stats
+        run: |
+          ccache -s || true
+
+      - name: Produce Image.gz-dtb
+        run: |
+          set -eux
+
+          OUT=out/arch/arm64/boot
+
+          gzip -n -9 -c "$OUT/Image" > "$OUT/Image.gz"
+
+          DTB=$(find "$OUT/dts" -type f -name '*mido*.dtb' | head -n1 || true)
+
+          if [ -z "$DTB" ]; then
+            echo "DTB not found; listing $OUT/dts"
+            find "$OUT/dts" -maxdepth 2 -type f | head -100 || true
+            exit 1
+          fi
+
+          echo "Using DTB: $DTB"
+
+          cat "$OUT/Image.gz" "$DTB" > "$OUT/Image.gz-dtb"
+
+          ls -lh "$OUT/Image.gz-dtb"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mido-Image.gz-dtb-KSU-backslashxx
+          path: out/arch/arm64/boot/Image.gz-dtb
