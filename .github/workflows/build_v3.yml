@@ -1,0 +1,155 @@
+name: Build mido kernel v3
+
+on:
+  workflow_dispatch:
+
+env:
+  CCACHE_DIR: ${{ runner.tmp }}/ccache   # persistent within runner and cacheable
+  CCACHE_MAXSIZE: 10G
+  PROTON_CLANG_CACHE_KEY: proton-clang-${{ runner.os }}-v1
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          repository: jamet320/android_kernel_xiaomi_mido
+          ref: lineage-22.2
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            bc \
+            bison \
+            build-essential \
+            flex \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            libssl-dev \
+            libelf-dev \
+            python3 \
+            rsync \
+            unzip \
+            ccache \
+            device-tree-compiler
+
+      - name: Cache proton clang
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: ${{ env.PROTON_CLANG_CACHE_KEY }}
+          restore-keys: |
+            proton-clang-${{ runner.os }}-
+
+      - name: Setup proton clang
+        run: |
+          # Clone proton-clang once (depth=1)
+          if [ ! -d clang ]; then
+            git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
+          fi
+          ls -la clang/bin
+          # Add proton-clang to PATH (so clang/ld.lld are used)
+          echo "Proton clang at: $(pwd)/clang/bin"
+          export PATH="$(pwd)/clang/bin:$PATH"
+        shell: bash
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          # Key should not be github.sha (that invalidates every commit)
+          # We include a hash of kernel sources to invalidate when sources change.
+          key: ccache-mido-${{ runner.os }}-${{ hashFiles('**/*.c', '**/*.h', 'arch/**', 'include/**') }}
+          restore-keys: |
+            ccache-mido-${{ runner.os }}-
+
+      - name: Configure ccache
+        run: |
+          mkdir -p "${CCACHE_DIR}"
+          ccache --max-size=${CCACHE_MAXSIZE}
+          ccache --set-config compression=true
+          ccache -z
+          echo "ccache dir: ${CCACHE_DIR}"
+          ccache -s
+
+      - name: Export build env & ensure ccache wrappers in PATH
+        run: |
+          export PATH="/usr/lib/ccache:$PATH"    # use distro ccache wrapper if present
+          export PATH="${GITHUB_WORKSPACE}/clang/bin:$PATH"
+          echo "PATH=$PATH"
+          echo "Using clang: $(which clang || true)"
+          echo "Using aarch64-linux-gnu-gcc: $(which aarch64-linux-gnu-gcc || true)"
+          # verify ccache wrapper intercept
+          echo "ccache version: $(ccache --version | head -n1)"
+          echo "ccache stats:"
+          ccache -s
+
+      - name: Build kernel
+        run: |
+          set -eux
+
+          export PATH="/usr/lib/ccache:$PATH"
+          export PATH="${GITHUB_WORKSPACE}/clang/bin:$PATH"
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+
+          # Use ccache with clang so compiler invocations are cached
+          export CC="ccache clang"
+          export HOSTCC="ccache gcc"
+
+          # Build output dir
+          make O=out mido_defconfig
+
+          # Build kernel (Image)
+          make -j$(nproc) \
+            O=out \
+            ARCH=arm64 \
+            CC="$CC" \
+            LLVM=1 \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32
+
+      - name: ccache stats
+        run: |
+          ccache -s || true
+
+      - name: Create Image.gz and Image.gz-dtb
+        run: |
+          set -eux
+          OUT=out/arch/arm64/boot
+          mkdir -p $OUT
+          # Ensure Image exists
+          if [ ! -f $OUT/Image ]; then
+            echo "ERROR: Image not found at $OUT/Image"
+            ls -la $OUT
+            exit 1
+          fi
+          # gzip without timestamp for reproducibility
+          gzip -n -9 -c $OUT/Image > $OUT/Image.gz
+          # make sure dtb path exists - pick the mido DTB (adjust if different)
+          DTB=$OUT/dts/qcom/msm8953-qrd-sku3-mido.dtb
+          if [ ! -f "$DTB" ]; then
+            # fallback: pick any dtb in out/arch/arm64/boot/dts
+            DTB=$(find out/arch/arm64/boot/dts -type f -name '*mido*.dtb' | head -n1 || true)
+          fi
+          if [ -z "$DTB" ] || [ ! -f "$DTB" ]; then
+            echo "ERROR: DTB not found"
+            ls -la out/arch/arm64/boot/dts || true
+            exit 1
+          fi
+          cat $OUT/Image.gz $DTB > $OUT/Image.gz-dtb
+          ls -la $OUT/Image.gz $OUT/Image.gz-dtb $DTB
+
+      - name: Upload kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: mido-Image.gz-dtb
+          path: out/arch/arm64/boot/Image.gz-dtb
