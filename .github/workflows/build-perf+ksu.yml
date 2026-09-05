@@ -1,4 +1,4 @@
-name: Build mido kernel perf4.9 + XXKSU
+name: Build mido kernel perf4.9 + xxksu
 
 on:
   workflow_dispatch:
@@ -25,11 +25,17 @@ jobs:
 
       - name: Download backslashxx KernelSU
         run: |
-          git clone --depth=1 https://github.com/backslashxx/KernelSU KernelSU
+          set -eux
+
+          git clone --depth=1 \
+            https://github.com/backslashxx/KernelSU \
+            KernelSU
+
+          echo "=== KernelSU ==="
           ls -la KernelSU
+          echo "=== KernelSU kernel ==="
           ls -la KernelSU/kernel
 
-      - name: Integrate backslashxx KernelSU
       - name: Integrate backslashxx KernelSU
         run: |
           set -eux
@@ -39,52 +45,61 @@ jobs:
           echo "=== Kernel source ==="
           pwd
           test -d drivers
-          test -d KernelSU/kernel
+          test -f Makefile
 
-          echo "=== Run backslashxx KernelSU setup ==="
+          echo "=== KernelSU setup ==="
           ./KernelSU/kernel/setup.sh
 
           echo "=== KernelSU integration check ==="
           test -d drivers/kernelsu
           ls -la drivers/kernelsu
 
-          echo "=== KSU config references ==="
+          echo "=== CONFIG_KSU references ==="
           grep -Rni "CONFIG_KSU" drivers/kernelsu | head -20 || true
 
-      - name: Download proton-clang (shallow)
+      - name: Download proton-clang
         run: |
-          if [ ! -d clang ]; then
-            git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
-          fi
-          ls -la clang/bin
+          set -eux
 
-      - name: Prepare ccache dir and add wrappers
+          if [ ! -d clang ]; then
+            git clone --depth=1 \
+              https://github.com/kdrag0n/proton-clang \
+              clang
+          fi
+
+          echo "=== Proton Clang ==="
+          ls -la clang/bin
+          clang/bin/clang --version | head -n1
+
+      - name: Prepare ccache
         run: |
+          set -eux
+
           export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+
           mkdir -p "$CCACHE_DIR"
+
           ccache --max-size=10G
 
           if [ -d /usr/lib/ccache ]; then
-            export PATH="/usr/lib/ccache:$PATH"
+            echo "/usr/lib/ccache"
+            echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           elif [ -d /usr/lib64/ccache ]; then
-            export PATH="/usr/lib64/ccache:$PATH"
+            echo "/usr/lib64/ccache"
+            echo "/usr/lib64/ccache" >> "$GITHUB_PATH"
           fi
 
-          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
-
-          echo "PATH=$PATH"
-          which clang || true
-          clang --version | head -n1 || true
+          echo "$GITHUB_WORKSPACE/clang/bin" >> "$GITHUB_PATH"
 
       - name: Cache ccache directory
         uses: actions/cache@v4
         with:
           path: ./.ccache
-          key: ccache-mido-${{ runner.os }}-${{ matrix.compiler || 'clang' }}
+          key: ccache-mido-${{ runner.os }}-clang
           restore-keys: |
             ccache-mido-${{ runner.os }}-
 
-      - name: Configure and build
+      - name: Configure kernel
         env:
           ARCH: arm64
           CROSS_COMPILE: aarch64-linux-gnu-
@@ -93,28 +108,41 @@ jobs:
           set -eux
 
           export PATH="$GITHUB_WORKSPACE/clang/bin:/usr/lib/ccache:$PATH"
+
           export CC="ccache clang"
           export HOSTCC="ccache gcc"
 
-          # Ensure KSU is enabled in the defconfig
-          make O=out mido_defconfig
+          echo "=== Kernel config ==="
 
-          scripts/config --file out/.config \
-            -e CONFIG_KSU
+          make O=out \
+            ARCH=arm64 \
+            mido_defconfig
 
-          make O=out olddefconfig
+          echo "=== Check KSU config ==="
+          grep -E 'CONFIG_KSU|KSU' out/.config || true
 
-          echo "=== KSU config ==="
-          grep -E '^CONFIG_KSU=' out/.config || true
+      - name: Build kernel
+        env:
+          ARCH: arm64
+          CROSS_COMPILE: aarch64-linux-gnu-
+          CROSS_COMPILE_ARM32: arm-linux-gnueabi-
+        run: |
+          set -eux
 
-          # Build kernel
-          make -j$(nproc) \
+          export PATH="$GITHUB_WORKSPACE/clang/bin:/usr/lib/ccache:$PATH"
+
+          export CC="ccache clang"
+          export HOSTCC="ccache gcc"
+
+          echo "=== Build kernel ==="
+
+          make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
             CC="$CC" \
             LLVM=1 \
-            CROSS_COMPILE=$CROSS_COMPILE \
-            CROSS_COMPILE_ARM32=$CROSS_COMPILE
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
 
       - name: ccache stats
         run: |
@@ -124,22 +152,43 @@ jobs:
         run: |
           set -eux
 
-          OUT=out/arch/arm64/boot
+          OUT="$GITHUB_WORKSPACE/out/arch/arm64/boot"
 
-          gzip -n -9 -c "$OUT/Image" > "$OUT/Image.gz"
+          echo "=== Boot output ==="
+          ls -lah "$OUT"
 
-          DTB=$(find "$OUT/dts" -type f -name '*mido*.dtb' | head -n1 || true)
+          test -f "$OUT/Image"
+
+          echo "=== Compress Image ==="
+
+          gzip -n -9 -c \
+            "$OUT/Image" \
+            > "$OUT/Image.gz"
+
+          echo "=== Find mido DTB ==="
+
+          DTB=$(find "$OUT/dts" \
+            -type f \
+            -name '*mido*.dtb' \
+            | head -n1 || true)
 
           if [ -z "$DTB" ]; then
-            echo "DTB not found; listing $OUT/dts"
-            find "$OUT/dts" -maxdepth 2 -type f | head -100 || true
+            echo "DTB not found."
+            echo "=== DTS directory ==="
+            find "$OUT/dts" -maxdepth 3 -type f | head -100 || true
             exit 1
           fi
 
-          echo "Using DTB: $DTB"
+          echo "DTB: $DTB"
 
-          cat "$OUT/Image.gz" "$DTB" > "$OUT/Image.gz-dtb"
+          echo "=== Create Image.gz-dtb ==="
 
+          cat \
+            "$OUT/Image.gz" \
+            "$DTB" \
+            > "$OUT/Image.gz-dtb"
+
+          echo "=== Final kernel ==="
           ls -lh "$OUT/Image.gz-dtb"
 
       - name: Upload artifact
