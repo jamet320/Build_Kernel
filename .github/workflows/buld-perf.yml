@@ -1,0 +1,100 @@
+name: Build mido kernel perf4.9
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            bc bison build-essential flex gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi libssl-dev libelf-dev python3 \
+            rsync unzip ccache device-tree-compiler
+
+      - name: Download proton-clang (shallow)
+        run: |
+          if [ ! -d clang ]; then
+            git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
+          fi
+          ls -la clang/bin
+
+      - name: Prepare ccache dir and add wrappers
+        run: |
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+          mkdir -p "$CCACHE_DIR"
+          ccache --max-size=10G
+          # Ensure distro ccache wrappers (if present) are in PATH first
+          if [ -d /usr/lib/ccache ]; then
+            export PATH="/usr/lib/ccache:$PATH"
+          elif [ -d /usr/lib64/ccache ]; then
+            export PATH="/usr/lib64/ccache:$PATH"
+          fi
+          # Also add proton-clang in front so clang/ld.lld come from it
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          echo "PATH=$PATH"
+          which clang || true
+          clang --version | head -n1 || true
+
+      - name: Cache ccache directory
+        uses: actions/cache@v4
+        with:
+          path: ./.ccache
+          key: ccache-mido-${{ runner.os }}-${{ matrix.compiler || 'clang' }}
+          restore-keys: |
+            ccache-mido-${{ runner.os }}-
+
+      - name: Configure and build
+        env:
+          ARCH: arm64
+          CROSS_COMPILE: aarch64-linux-gnu-
+          CROSS_COMPILE_ARM32: arm-linux-gnueabi-
+        run: |
+          set -eux
+
+          export PATH="$GITHUB_WORKSPACE/clang/bin:/usr/lib/ccache:$PATH"
+          export CC="ccache clang"
+          export HOSTCC="ccache gcc"
+
+          # ensure defconfig exists
+          make O=out mido_defconfig
+
+          # build kernel (Image/dtbs)
+          make -j$(nproc) \
+            O=out \
+            ARCH=arm64 \
+            CC="$CC" \
+            LLVM=1 \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32
+
+      - name: ccache stats
+        run: ccache -s || true
+
+      - name: Produce Image.gz-dtb
+        run: |
+          OUT=out/arch/arm64/boot
+          gzip -n -9 -c $OUT/Image > $OUT/Image.gz
+          DTB=$(find $OUT/dts -type f -name '*mido*.dtb' | head -n1 || true)
+          if [ -z "$DTB" ]; then
+            echo "DTB not found; listing $OUT/dts"
+            ls -la $OUT/dts || true
+            exit 1
+          fi
+          cat $OUT/Image.gz $DTB > $OUT/Image.gz-dtb
+          ls -l $OUT/Image.gz-dtb
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mido-Image.gz-dtb
+          path: out/arch/arm64/boot/Image.gz-dtb
