@@ -30,20 +30,25 @@ jobs:
           ls -la KernelSU/kernel
 
       - name: Integrate backslashxx KernelSU
+      - name: Integrate backslashxx KernelSU
         run: |
           set -eux
 
-          # Integrate KernelSU into the 4.9 kernel source
-          cd KernelSU/kernel
-          ./setup.sh "$GITHUB_WORKSPACE"
-
           cd "$GITHUB_WORKSPACE"
+
+          echo "=== Kernel source ==="
+          pwd
+          test -d drivers
+          test -d KernelSU/kernel
+
+          echo "=== Run backslashxx KernelSU setup ==="
+          ./KernelSU/kernel/setup.sh
 
           echo "=== KernelSU integration check ==="
           test -d drivers/kernelsu
           ls -la drivers/kernelsu
 
-          echo "=== KernelSU references ==="
+          echo "=== KSU config references ==="
           grep -Rni "CONFIG_KSU" drivers/kernelsu | head -20 || true
 
       - name: Download proton-clang (shallow)
