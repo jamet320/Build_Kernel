@@ -79,6 +79,25 @@ jobs:
             drivers/kernelsu \
             | head -30 || true
 
+      - name: Patch KernelSU sepolicy rule (untrusted_app -> adb_data_file)
+        run: |
+          set -eux
+
+          cd "$GITHUB_WORKSPACE"
+
+          FILE=$(grep -rl "apply_kernelsu_rules" drivers/kernelsu --include="*.c" | head -n1)
+
+          if [ -z "$FILE" ]; then
+            echo "WARNING: rules.c with apply_kernelsu_rules() not found under drivers/kernelsu - skipping patch"
+          else
+            echo "Patching: $FILE"
+
+            sed -i '/ksu_allow(db, "init", KERNEL_SU_DOMAIN, ALL, ALL);/a\	ksu_allow(db, "untrusted_app", "adb_data_file", "dir", "getattr");\n\tksu_allow(db, "untrusted_app", "adb_data_file", "file", "getattr");' "$FILE"
+
+            echo "=== Patch result ==="
+            grep -n -B2 -A2 "untrusted_app.*adb_data_file" "$FILE" || true
+          fi
+
       - name: Download proton-clang
         run: |
           set -eux
