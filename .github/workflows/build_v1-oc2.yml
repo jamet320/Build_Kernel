@@ -41,7 +41,7 @@ jobs:
             coccinelle
 
             - name: Integrate KernelSU-Next Legacy
-        run: |
+          run: |
           set -eux
 
           cd "$GITHUB_WORKSPACE"
