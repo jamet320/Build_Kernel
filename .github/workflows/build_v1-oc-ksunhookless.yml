@@ -6,21 +6,29 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: mido-v1-oc-kernel
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-22.04
+
     env:
       ARCH: arm64
       CROSS_COMPILE: aarch64-linux-gnu-
       CROSS_COMPILE_ARM32: arm-linux-gnueabi-
+
     steps:
-      - uses: actions/checkout@v4
+
+      - name: Checkout kernel
+        uses: actions/checkout@v4
         with:
           repository: jamet320/android_kernel_xiaomi_mido
           ref: v1-oc
           fetch-depth: 1
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential flex \
@@ -33,7 +41,7 @@ jobs:
           git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
           echo "$PWD/clang/bin" >> $GITHUB_PATH
 
-      - name: Integrate KSU-Next
+      - name: Integrate KernelSU-Next
         run: |
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
           test -e drivers/kernelsu
@@ -44,23 +52,23 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
           # fs/exec.c
-          sed -i '/^static int do_execve(struct filename \*filename,/i #ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif' fs/exec.c
+          sed -i '1i #ifdef CONFIG_KSU\nextern int ksu_handle_execveat(int *fd, void **filename_ptr, void *argv, void *envp, int *flags);\n#endif' fs/exec.c
           sed -i '/struct user_arg_ptr envp = { .ptr.native = __envp };/a #ifdef CONFIG_KSU\n\tksu_handle_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0);\n#endif' fs/exec.c
 
-          # fs/open.c - extern AFTER include (bukan baris 1)
-          sed -i '/^#include <linux\/fs.h>/a #ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif' fs/open.c
+          # fs/open.c
+          sed -i '1i #ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char **filename_user, int *mode, int *flags);\n#endif' fs/open.c
           sed -i '/^SYSCALL_DEFINE3(faccessat,/,/^{$/s/^{$/{\n#ifdef CONFIG_KSU\n\tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\n#endif/' fs/open.c
 
           # fs/read_write.c
-          sed -i '/^SYSCALL_DEFINE3(read,/i #ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n#endif' fs/read_write.c
+          sed -i '1i #ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern int ksu_handle_sys_read(unsigned int fd, char **buf_ptr, size_t *count_ptr);\n#endif' fs/read_write.c
           sed -i '/^SYSCALL_DEFINE3(read,/,/^{$/s/^{$/{\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, \&buf, \&count);\n#endif/' fs/read_write.c
 
           # fs/stat.c
-          sed -i '/^#include <linux\/fs.h>/a #ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif' fs/stat.c
+          sed -i '1i #ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char **filename_user, int *flags);\n#endif' fs/stat.c
           sed -i '/^SYSCALL_DEFINE4(newfstatat,/,/^{$/s/^{$/{\n#ifdef CONFIG_KSU\n\tksu_handle_stat(\&dfd, \&filename, \&flag);\n#endif/' fs/stat.c
 
           # kernel/reboot.c
-          sed -i '/^SYSCALL_DEFINE4(reboot,/i #ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif' kernel/reboot.c
+          sed -i '1i #ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void **arg);\n#endif' kernel/reboot.c
           sed -i '/^SYSCALL_DEFINE4(reboot,/,/^{$/s/^{$/{\n#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif/' kernel/reboot.c
 
           echo "=== VERIFY ==="
@@ -75,8 +83,9 @@ jobs:
         run: |
           sed -i -E '/^CONFIG_KSU/d' arch/arm64/configs/mido_defconfig
           printf '\nCONFIG_KSU=y\nCONFIG_KSU_MANUAL_HOOK=y\n' >> arch/arm64/configs/mido_defconfig
+          grep -E '^CONFIG_KSU' arch/arm64/configs/mido_defconfig
 
-      - name: Build
+      - name: Build kernel
         run: |
           export CC="ccache clang"
           export HOSTCC="ccache gcc"
@@ -84,16 +93,18 @@ jobs:
           make -j$(nproc) O=out ARCH=arm64 CC="$CC" HOSTCC="$HOSTCC" LLVM=1 \
             CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
 
-      - name: Package
+      - name: Package Image.gz-dtb
         run: |
           OUT="$PWD/out/arch/arm64/boot"
+          test -f "$OUT/Image"
           gzip -n -9 -c "$OUT/Image" > "$OUT/Image.gz"
           DTB=$(find "$OUT/dts" -name '*mido*.dtb' | head -1)
           test -n "$DTB"
           cat "$OUT/Image.gz" "$DTB" > "$OUT/Image.gz-dtb"
           ls -lh "$OUT/Image.gz-dtb"
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload
+        uses: actions/upload-artifact@v4
         with:
-          name: kernel
+          name: mido-ksu-hookless
           path: out/arch/arm64/boot/Image.gz-dtb
