@@ -1,4 +1,4 @@
-name: Build v1-oc + KernelSU-Next Hookless
+name: Build v1-oc + KernelSU-Next Hookless 2
 
 on:
   workflow_dispatch:
