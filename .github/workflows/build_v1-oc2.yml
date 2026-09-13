@@ -40,8 +40,8 @@ jobs:
             device-tree-compiler \
             coccinelle
 
-            - name: Integrate KernelSU-Next Legacy
-          run: |
+      - name: Integrate KernelSU-Next Legacy
+        run: |
           set -eux
 
           cd "$GITHUB_WORKSPACE"
