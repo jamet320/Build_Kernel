@@ -40,18 +40,19 @@ jobs:
             device-tree-compiler \
             coccinelle
 
-      - name: Integrate KernelSU-Next
+            - name: Integrate KernelSU-Next Legacy
         run: |
           set -eux
 
           cd "$GITHUB_WORKSPACE"
 
-          echo "=== Downloading and running KernelSU-Next setup ==="
-          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -
+          echo "=== Downloading and running KernelSU-Next legacy setup ==="
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/legacy/kernel/setup.sh" | bash -
 
           echo "=== KernelSU-Next integration check ==="
           test -d drivers/kernelsu
           ls -la drivers/kernelsu
+
 
       - name: Apply KernelSU-Next manual hooks
         run: |
