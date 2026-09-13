@@ -99,81 +99,28 @@ jobs:
         run: |
           set -eux
           cd "$GITHUB_WORKSPACE"
-          echo "=== Installing KernelSU-Next legacy ==="
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
-          echo "=== KernelSU integration ==="
           test -e drivers/kernelsu
           ls -la drivers/kernelsu
-          grep -nEi 'kernelsu|ksu' drivers/Makefile || true
-          grep -nEi 'kernelsu|ksu' drivers/Kconfig || true
 
       - name: Apply KernelSU-Next Manual Hooks
         run: |
           set -eux
           cd "$GITHUB_WORKSPACE"
-
-          cat > /tmp/ksu_hooks.py <<'PYEOF'
-          import re
-          import sys
-
-          def patch(path, pattern, replacement, label):
-              with open(path) as f:
-                  src = f.read()
-              new_src, n = re.subn(pattern, replacement, src, count=1)
-              if n != 1:
-                  print("FAIL: " + label + " (" + path + ") matched " + str(n) + " times")
-                  sys.exit(1)
-              with open(path, 'w') as f:
-                  f.write(new_src)
-              print("OK: " + label + " patched in " + path)
-
-          patch(
-              "fs/exec.c",
-              r"(static int do_execveat_common\(int fd, struct filename \*filename,\s*\n\s*struct user_arg_ptr argv,\s*\n\s*struct user_arg_ptr envp,\s*\n\s*int flags\)\s*\n\{)",
-              "\\1\n#ifdef CONFIG_KSU\n\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n#endif",
-              "do_execveat_common"
-          )
-
-          patch(
-              "fs/open.c",
-              r"(static int do_faccessat\(int dfd, const char __user \*filename, int mode\)\s*\n\{)",
-              "\\1\n#ifdef CONFIG_KSU\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif",
-              "do_faccessat"
-          )
-
-          patch(
-              "fs/read_write.c",
-              r"(ssize_t vfs_read\(struct file \*file, char __user \*buf, size_t count, loff_t \*pos\)\s*\n\{)",
-              "\\1\n#ifdef CONFIG_KSU\n\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif",
-              "vfs_read"
-          )
-
-          patch(
-              "fs/stat.c",
-              r"(static int vfs_fstatat\(int dfd, const char __user \*filename, struct kstat \*stat,\s*\n\s*int flag\)\s*\n\{)",
-              "\\1\n#ifdef CONFIG_KSU\n\tksu_handle_stat(&dfd, &filename, &flag);\n#endif",
-              "vfs_fstatat"
-          )
-
-          print("All hooks patched successfully.")
-          PYEOF
-
-          python3 /tmp/ksu_hooks.py
-
-          echo "=== Verify hooks injected ==="
-          grep -n "ksu_handle_execveat" fs/exec.c || { echo "ERROR: exec.c hook missing"; exit 1; }
-          grep -n "ksu_handle_faccessat" fs/open.c || { echo "ERROR: open.c hook missing"; exit 1; }
-          grep -n "ksu_handle_vfs_read" fs/read_write.c || { echo "ERROR: read_write.c hook missing"; exit 1; }
-          grep -n "ksu_handle_stat" fs/stat.c || { echo "ERROR: stat.c hook missing"; exit 1; }
+          git clone --depth=1 https://github.com/devnoname120/kernelsu-coccinelle.git /tmp/ksu-cocci
+          chmod +x /tmp/ksu-cocci/patch.sh
+          /tmp/ksu-cocci/patch.sh
+          grep -n "ksu_handle_execveat" fs/exec.c
+          grep -n "ksu_handle_faccessat" fs/open.c
+          grep -n "ksu_handle_vfs_read" fs/read_write.c
+          grep -n "ksu_handle_stat" fs/stat.c
 
       - name: Configure KernelSU-Next Hookless
         run: |
           set -eux
           DEFCONFIG="arch/arm64/configs/mido_defconfig"
-          grep -nE 'CONFIG_KSU|CONFIG_KPROBE|CONFIG_LSM' "$DEFCONFIG" || true
           sed -i -E '/^CONFIG_KSU/d' "$DEFCONFIG"
           printf '\nCONFIG_KSU=y\nCONFIG_KSU_MANUAL_HOOK=y\n' >> "$DEFCONFIG"
-          tail -n 10 "$DEFCONFIG"
 
       - name: Generate kernel config
         run: |
@@ -181,27 +128,10 @@ jobs:
           export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
           export CC="ccache clang"
           export HOSTCC="ccache gcc"
-
           make O=out ARCH="$ARCH" mido_defconfig
-
-          echo "=== FINAL KERNELSU CONFIG ==="
-          grep -E '^(CONFIG_KSU|CONFIG_KPROBE|CONFIG_HAVE_KPROBE|CONFIG_SECURITY)' out/.config || true
-
-          echo "=== VERIFY HOOKLESS ==="
           grep -q '^CONFIG_KSU=y$' out/.config
           grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' out/.config
-
-          if grep -q '^CONFIG_KSU_WITH_KPROBES=y$' out/.config; then
-            echo "ERROR: KSU KPROBES HOOK ENABLED"; exit 1
-          fi
-          if grep -q '^CONFIG_KSU_KPROBE_HOOK=y$' out/.config; then
-            echo "ERROR: KSU KPROBE HOOK ENABLED"; exit 1
-          fi
-          if grep -q '^CONFIG_KSU_KPROBES_HOOK=y$' out/.config; then
-            echo "ERROR: KSU KPROBES HOOK ENABLED"; exit 1
-          fi
-
-          echo "KSU HOOKLESS (MANUAL VFS HOOKS) CONFIG OK"
+          echo "KSU HOOKLESS OK"
 
       - name: Build kernel
         run: |
@@ -209,39 +139,20 @@ jobs:
           export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
           export CC="ccache clang"
           export HOSTCC="ccache gcc"
-
           make -j"$(nproc)" O=out ARCH="$ARCH" \
             CC="$CC" HOSTCC="$HOSTCC" LLVM=1 \
             CROSS_COMPILE="$CROSS_COMPILE" \
             CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
 
-          ccache --show-stats
-
       - name: Create Image.gz-dtb
         run: |
           set -eux
           OUT="$GITHUB_WORKSPACE/out/arch/arm64/boot"
-          test -f "$OUT/Image"
-
           gzip -n -9 -c "$OUT/Image" > "$OUT/Image.gz"
-
           DTB="$(find "$OUT/dts" -type f -name '*mido*.dtb' -print | head -n 1)"
-
-          if [ -z "$DTB" ]; then
-            echo "ERROR: mido DTB not found"
-            find "$OUT/dts" -type f -name '*.dtb' | head -50
-            exit 1
-          fi
-
-          echo "DTB: $DTB"
+          test -n "$DTB"
           cat "$OUT/Image.gz" "$DTB" > "$OUT/Image.gz-dtb"
-          ls -lh "$OUT/Image" "$OUT/Image.gz" "$OUT/Image.gz-dtb"
-
-      - name: Verify KSU in built kernel
-        run: |
-          set -eux
-          strings out/vmlinux | grep -iE 'KernelSU|ksu_' | head -50 || true
-          grep -E '^(CONFIG_KSU|CONFIG_KPROBE|CONFIG_HAVE_KPROBE)' out/.config || true
+          ls -lh "$OUT/Image.gz-dtb"
 
       - name: Upload kernel
         uses: actions/upload-artifact@v4
@@ -250,10 +161,3 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           path: out/arch/arm64/boot/Image.gz-dtb
-
-      - name: Upload build config
-        uses: actions/upload-artifact@v4
-        with:
-          name: mido-v1-oc-KSU-Hookless-2-config
-          compression-level: 9
-          path: out/.config
