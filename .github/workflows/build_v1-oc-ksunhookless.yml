@@ -195,38 +195,20 @@ jobs:
             "$DEFCONFIG" || true
 
           echo
-          echo "=== Remove conflicting KSU hook modes ==="
+          echo "=== Remove all existing KSU configs ==="
 
-          sed -i \
-            -E '/^CONFIG_KSU_WITH_KPROBES=/d' \
-            "$DEFCONFIG"
-
-          sed -i \
-            -E '/^CONFIG_KSU_KPROBE_HOOK=/d' \
-            "$DEFCONFIG"
-
-          sed -i \
-            -E '/^CONFIG_KSU_KPROBES_HOOK=/d' \
-            "$DEFCONFIG"
-
-          sed -i \
-            -E '/^CONFIG_KSU_MANUAL_HOOK=/d' \
-            "$DEFCONFIG"
-
-          sed -i \
-            -E '/^CONFIG_KSU_LSM_SECURITY_HOOKS=/d' \
-            "$DEFCONFIG"
+          sed -i -E '/^CONFIG_KSU/d' "$DEFCONFIG"
 
           echo
-          echo "=== Enable KSU + LSM hookless backend ==="
+          echo "=== Enable KSU Hookless (Manual VFS Hooks) ==="
 
           cat >> "$DEFCONFIG" <<'EOF'
 
-          # KernelSU Next - Hookless (Manual VFS Hooks)
-          CONFIG_KSU=y
-          CONFIG_KSU_WITH_KPROBES=n
-          CONFIG_KSU_LSM_SECURITY_HOOKS=y
-          EOF
+# KernelSU-Next - Hookless (Manual VFS Hooks)
+CONFIG_KSU=y
+CONFIG_KSU_MANUAL_HOOK=y
+# CONFIG_KSU_WITH_KPROBES is not set
+EOF
 
           echo
           echo "=== KSU config requested ==="
@@ -265,6 +247,11 @@ jobs:
           echo "VERIFY HOOKLESS"
           echo "================================================"
 
+          # Hookless = Manual VFS Hooks -> WAJIB ada
+          grep -q '^CONFIG_KSU=y$' out/.config
+          grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' out/.config
+
+          # Kprobe hook -> WAJIB tidak ada
           if grep -q '^CONFIG_KSU_WITH_KPROBES=y$' out/.config; then
             echo "ERROR: KSU KPROBES HOOK ENABLED"
             exit 1
@@ -280,17 +267,8 @@ jobs:
             exit 1
           fi
 
-          if grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' out/.config; then
-            echo "ERROR: KSU MANUAL HOOK ENABLED"
-            exit 1
-          fi
-
-          grep -q '^CONFIG_KSU=y$' out/.config
-
-          grep -q '^CONFIG_KSU_LSM_SECURITY_HOOKS=y$' out/.config
-
           echo
-          echo "KSU HOOKLESS / LSM CONFIG OK"
+          echo "KSU HOOKLESS (MANUAL VFS HOOKS) CONFIG OK"
 
       # ============================================================
       # BUILD
@@ -411,7 +389,7 @@ jobs:
       - name: Upload kernel
         uses: actions/upload-artifact@v4
         with:
-          name: mido-v1-oc-KernelSU-Next-Hookless
+          name: mido-v1-oc-KernelSU-Next-Hookless-2
           if-no-files-found: error
           compression-level: 0
           path: |
@@ -420,7 +398,7 @@ jobs:
       - name: Upload build config
         uses: actions/upload-artifact@v4
         with:
-          name: mido-v1-oc-KSU-Hookless-config
+          name: mido-v1-oc-KSU-Hookless-2-config
           compression-level: 9
           path: |
             out/.config
