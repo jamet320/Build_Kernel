@@ -24,20 +24,12 @@ jobs:
 
     steps:
 
-      # ============================================================
-      # SOURCE
-      # ============================================================
-
       - name: Checkout kernel
         uses: actions/checkout@v4
         with:
           repository: jamet320/android_kernel_xiaomi_mido
           ref: v1-oc
           fetch-depth: 1
-
-      # ============================================================
-      # DEPENDENCIES
-      # ============================================================
 
       - name: Install build dependencies
         run: |
@@ -67,10 +59,6 @@ jobs:
 
           sudo rm -rf /var/lib/apt/lists/*
 
-      # ============================================================
-      # PROTON CLANG VERSION
-      # ============================================================
-
       - name: Get Proton Clang commit
         id: proton
         run: |
@@ -86,10 +74,6 @@ jobs:
 
           echo "Proton Clang:"
           echo "$COMMIT"
-
-      # ============================================================
-      # PROTON CLANG CACHE
-      # ============================================================
 
       - name: Restore Proton Clang cache
         id: clang-cache
@@ -120,10 +104,6 @@ jobs:
 
           echo "$GITHUB_WORKSPACE/clang/bin" >> "$GITHUB_PATH"
 
-      # ============================================================
-      # CCACHE
-      # ============================================================
-
       - name: Prepare ccache
         run: |
           set -eux
@@ -146,10 +126,6 @@ jobs:
           key: ccache-mido-v1-oc-arm64-proton-${{ runner.os }}
           restore-keys: |
             ccache-mido-v1-oc-arm64-proton-
-
-      # ============================================================
-      # KERNELSU-NEXT (HOOKLESS / MANUAL VFS HOOKS)
-      # ============================================================
 
       - name: Integrate KernelSU-Next Legacy
         run: |
@@ -178,10 +154,6 @@ jobs:
           echo "=== drivers/Kconfig ==="
           grep -nEi 'kernelsu|ksu' drivers/Kconfig || true
 
-      # ============================================================
-      # HOOKLESS CONFIG
-      # ============================================================
-
       - name: Configure KernelSU-Next Hookless
         run: |
           set -eux
@@ -189,35 +161,19 @@ jobs:
           DEFCONFIG="arch/arm64/configs/mido_defconfig"
 
           echo "=== Existing KSU config ==="
-
-          grep -nE \
-            'CONFIG_KSU|CONFIG_KPROBE|CONFIG_LSM' \
-            "$DEFCONFIG" || true
+          grep -nE 'CONFIG_KSU|CONFIG_KPROBE|CONFIG_LSM' "$DEFCONFIG" || true
 
           echo
           echo "=== Remove all existing KSU configs ==="
-
           sed -i -E '/^CONFIG_KSU/d' "$DEFCONFIG"
 
           echo
           echo "=== Enable KSU Hookless (Manual VFS Hooks) ==="
-
-          cat >> "$DEFCONFIG" <<'EOF'
-
-# KernelSU-Next - Hookless (Manual VFS Hooks)
-CONFIG_KSU=y
-CONFIG_KSU_MANUAL_HOOK=y
-# CONFIG_KSU_WITH_KPROBES is not set
-EOF
+          printf '\n# KernelSU-Next - Hookless (Manual VFS Hooks)\nCONFIG_KSU=y\nCONFIG_KSU_MANUAL_HOOK=y\n# CONFIG_KSU_WITH_KPROBES is not set\n' >> "$DEFCONFIG"
 
           echo
           echo "=== KSU config requested ==="
-
           tail -n 20 "$DEFCONFIG"
-
-      # ============================================================
-      # DEFCONFIG
-      # ============================================================
 
       - name: Generate kernel config
         run: |
@@ -247,11 +203,9 @@ EOF
           echo "VERIFY HOOKLESS"
           echo "================================================"
 
-          # Hookless = Manual VFS Hooks -> WAJIB ada
           grep -q '^CONFIG_KSU=y$' out/.config
           grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' out/.config
 
-          # Kprobe hook -> WAJIB tidak ada
           if grep -q '^CONFIG_KSU_WITH_KPROBES=y$' out/.config; then
             echo "ERROR: KSU KPROBES HOOK ENABLED"
             exit 1
@@ -269,10 +223,6 @@ EOF
 
           echo
           echo "KSU HOOKLESS (MANUAL VFS HOOKS) CONFIG OK"
-
-      # ============================================================
-      # BUILD
-      # ============================================================
 
       - name: Build kernel
         run: |
@@ -300,10 +250,6 @@ EOF
 
           ccache --show-stats
 
-      # ============================================================
-      # CREATE IMAGE.GZ-DTB
-      # ============================================================
-
       - name: Create Image.gz-dtb
         run: |
           set -eux
@@ -313,31 +259,16 @@ EOF
           test -f "$OUT/Image"
 
           echo "=== Compress Image ==="
-
-          gzip \
-            -n \
-            -9 \
-            -c "$OUT/Image" \
-            > "$OUT/Image.gz"
+          gzip -n -9 -c "$OUT/Image" > "$OUT/Image.gz"
 
           echo
           echo "=== Locate mido DTB ==="
 
-          DTB="$(
-            find "$OUT/dts" \
-              -type f \
-              -name '*mido*.dtb' \
-              -print \
-              | head -n 1
-          )"
+          DTB="$(find "$OUT/dts" -type f -name '*mido*.dtb' -print | head -n 1)"
 
           if [ -z "$DTB" ]; then
             echo "ERROR: mido DTB not found"
-            echo
-            find "$OUT/dts" \
-              -type f \
-              -name '*.dtb' \
-              | head -50
+            find "$OUT/dts" -type f -name '*.dtb' | head -50
             exit 1
           fi
 
@@ -345,46 +276,22 @@ EOF
 
           echo
           echo "=== Create Image.gz-dtb ==="
-
-          cat \
-            "$OUT/Image.gz" \
-            "$DTB" \
-            > "$OUT/Image.gz-dtb"
+          cat "$OUT/Image.gz" "$DTB" > "$OUT/Image.gz-dtb"
 
           echo
           echo "=== Output ==="
-
-          ls -lh \
-            "$OUT/Image" \
-            "$OUT/Image.gz" \
-            "$OUT/Image.gz-dtb"
-
-      # ============================================================
-      # KSU VERIFICATION
-      # ============================================================
+          ls -lh "$OUT/Image" "$OUT/Image.gz" "$OUT/Image.gz-dtb"
 
       - name: Verify KSU in built kernel
         run: |
           set -eux
 
           echo "=== KernelSU strings ==="
-
-          strings \
-            out/vmlinux \
-            | grep -iE \
-              'KernelSU|ksu_' \
-            | head -50 || true
+          strings out/vmlinux | grep -iE 'KernelSU|ksu_' | head -50 || true
 
           echo
           echo "=== Final config ==="
-
-          grep -E \
-            '^(CONFIG_KSU|CONFIG_KPROBE|CONFIG_HAVE_KPROBE)' \
-            out/.config || true
-
-      # ============================================================
-      # ARTIFACT
-      # ============================================================
+          grep -E '^(CONFIG_KSU|CONFIG_KPROBE|CONFIG_HAVE_KPROBE)' out/.config || true
 
       - name: Upload kernel
         uses: actions/upload-artifact@v4
