@@ -1,4 +1,4 @@
-name: Build v1-oc + KernelSU-Next Hookless (2)
+name: Build v1-oc + KernelSU-Next Legacy Hookless
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: mido-v1-oc-kernel
+  group: mido-v1-oc-ksunext
   cancel-in-progress: true
 
 jobs:
@@ -16,95 +16,455 @@ jobs:
 
     env:
       ARCH: arm64
+      SUBARCH: arm64
       CROSS_COMPILE: aarch64-linux-gnu-
       CROSS_COMPILE_ARM32: arm-linux-gnueabi-
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      KBUILD_BUILD_USER: github-actions
+      KBUILD_BUILD_HOST: github
+      KBUILD_BUILD_TIMESTAMP: 2026-09-14
 
     steps:
 
-      - name: Checkout kernel
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
+      - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
           repository: jamet320/android_kernel_xiaomi_mido
           ref: v1-oc
-          fetch-depth: 1
+          fetch-depth: 0
+
+      # ============================================================
+      # DEPENDENCIES
+      # ============================================================
 
       - name: Install dependencies
         run: |
+          set -eux
+
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
-            libssl-dev libelf-dev python3 rsync unzip \
-            ccache device-tree-compiler git curl gzip xz-utils
+
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            flex \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            libssl-dev \
+            libelf-dev \
+            python3 \
+            rsync \
+            unzip \
+            ccache \
+            device-tree-compiler \
+            coccinelle \
+            git \
+            curl \
+            wget \
+            zip
+
+      # ============================================================
+      # KERNELSU-NEXT
+      # ============================================================
+
+      - name: Integrate KernelSU-Next Legacy
+        run: |
+          set -eux
+
+          cd "$GITHUB_WORKSPACE"
+
+          echo "========================================"
+          echo " Installing KernelSU-Next Legacy"
+          echo "========================================"
+
+          curl -LSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+            | bash -s legacy
+
+          echo
+          echo "========================================"
+          echo " Verify KernelSU directory"
+          echo "========================================"
+
+          test -d drivers/kernelsu
+
+          ls -la drivers/kernelsu
+
+      # ============================================================
+      # VERIFY KSU SOURCE
+      # ============================================================
+
+      - name: Verify KernelSU-Next source
+        run: |
+          set -eux
+
+          cd "$GITHUB_WORKSPACE"
+
+          echo "=== drivers/Makefile ==="
+          grep -n "kernelsu" drivers/Makefile || true
+
+          echo
+          echo "=== drivers/Kconfig ==="
+          grep -n "kernelsu" drivers/Kconfig || true
+
+          echo
+          echo "=== KernelSU Kconfig ==="
+          if [ -f drivers/kernelsu/Kconfig ]; then
+            grep -nE \
+              "KSU|MANUAL|HOOK|KPROBE|KSUD" \
+              drivers/kernelsu/Kconfig || true
+          fi
+
+      # ============================================================
+      # PROTON CLANG CACHE
+      # ============================================================
+
+      - name: Restore Proton Clang cache
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: proton-clang-mido-${{ runner.os }}-v1-oc
+          restore-keys: |
+            proton-clang-mido-${{ runner.os }}-
 
       - name: Download Proton Clang
         run: |
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
-          echo "$PWD/clang/bin" >> $GITHUB_PATH
+          set -eux
 
-      - name: Integrate KernelSU-Next
-        run: |
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
-          test -e drivers/kernelsu
+          if [ ! -x clang/bin/clang ]; then
+            echo "Proton Clang cache miss."
 
-      - name: Apply Manual Hooks
+            rm -rf clang
+
+            git clone \
+              --depth=1 \
+              https://github.com/kdrag0n/proton-clang \
+              clang
+          else
+            echo "Proton Clang cache hit."
+          fi
+
+          echo
+          echo "=== Proton Clang ==="
+
+          test -x clang/bin/clang
+
+          clang/bin/clang --version | head -n 3
+
+      # ============================================================
+      # CCACHE CACHE
+      # ============================================================
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-mido-v1-oc-${{ runner.os }}-${{ hashFiles('arch/arm64/configs/mido_defconfig') }}
+          restore-keys: |
+            ccache-mido-v1-oc-${{ runner.os }}-
+            ccache-mido-${{ runner.os }}-
+
+      - name: Configure ccache
         run: |
           set -eux
+
+          mkdir -p "$CCACHE_DIR"
+
+          ccache --set-config=max_size=10G
+          ccache --set-config=compression=true
+
+          echo "$GITHUB_WORKSPACE/clang/bin" >> "$GITHUB_PATH"
+          echo "/usr/lib/ccache" >> "$GITHUB_PATH"
+
+          export PATH="$GITHUB_WORKSPACE/clang/bin:/usr/lib/ccache:$PATH"
+
+          echo "=== ccache version ==="
+          ccache --version
+
+          echo
+          echo "=== ccache configuration ==="
+          ccache --show-config
+
+          echo
+          echo "=== ccache statistics ==="
+          ccache --show-stats
+
+      # ============================================================
+      # PREPARE DEFCONFIG
+      # ============================================================
+
+      - name: Prepare kernel configuration
+        run: |
+          set -eux
+
           cd "$GITHUB_WORKSPACE"
 
-          # fs/exec.c
-          sed -i '1i #ifdef CONFIG_KSU\nextern int ksu_handle_execveat(int *fd, void **filename_ptr, void *argv, void *envp, int *flags);\n#endif' fs/exec.c
-          sed -i '/struct user_arg_ptr envp = { .ptr.native = __envp };/a #ifdef CONFIG_KSU\n\tksu_handle_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0);\n#endif' fs/exec.c
+          export PATH="$GITHUB_WORKSPACE/clang/bin:/usr/lib/ccache:$PATH"
 
-          # fs/open.c
-          sed -i '1i #ifdef CONFIG_KSU\nextern int ksu_handle_faccessat(int *dfd, const char **filename_user, int *mode, int *flags);\n#endif' fs/open.c
-          sed -i '/^SYSCALL_DEFINE3(faccessat,/,/^{$/s/^{$/{\n#ifdef CONFIG_KSU\n\tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\n#endif/' fs/open.c
+          echo "========================================"
+          echo " Preparing mido_defconfig"
+          echo "========================================"
 
-          # fs/read_write.c
-          sed -i '1i #ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern int ksu_handle_sys_read(unsigned int fd, char **buf_ptr, size_t *count_ptr);\n#endif' fs/read_write.c
-          sed -i '/^SYSCALL_DEFINE3(read,/,/^{$/s/^{$/{\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, \&buf, \&count);\n#endif/' fs/read_write.c
+          # Enable KernelSU if it is not already present.
+          if grep -q '^CONFIG_KSU=y$' arch/arm64/configs/mido_defconfig; then
+            echo "CONFIG_KSU already enabled."
+          else
+            echo "CONFIG_KSU=y" >> arch/arm64/configs/mido_defconfig
+          fi
 
-          # fs/stat.c
-          sed -i '1i #ifdef CONFIG_KSU\nextern int ksu_handle_stat(int *dfd, const char **filename_user, int *flags);\n#endif' fs/stat.c
-          sed -i '/^SYSCALL_DEFINE4(newfstatat,/,/^{$/s/^{$/{\n#ifdef CONFIG_KSU\n\tksu_handle_stat(\&dfd, \&filename, \&flag);\n#endif/' fs/stat.c
+          echo
+          echo "=== KSU entries in defconfig ==="
 
-          # kernel/reboot.c
-          sed -i '1i #ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void **arg);\n#endif' kernel/reboot.c
-          sed -i '/^SYSCALL_DEFINE4(reboot,/,/^{$/s/^{$/{\n#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif/' kernel/reboot.c
+          grep -E \
+            '^CONFIG_KSU' \
+            arch/arm64/configs/mido_defconfig || true
 
-          echo "=== VERIFY ==="
-          grep -q ksu_handle_execveat fs/exec.c || { echo "FAIL exec.c"; exit 1; }
-          grep -q ksu_handle_faccessat fs/open.c || { echo "FAIL open.c"; exit 1; }
-          grep -q ksu_handle_sys_read fs/read_write.c || { echo "FAIL read_write.c"; exit 1; }
-          grep -q ksu_handle_stat fs/stat.c || { echo "FAIL stat.c"; exit 1; }
-          grep -q ksu_handle_sys_reboot kernel/reboot.c || { echo "FAIL reboot.c"; exit 1; }
-          echo "ALL HOOKS OK"
+          echo
+          echo "========================================"
+          echo " Running defconfig"
+          echo "========================================"
 
-      - name: Configure defconfig
+          make \
+            O=out \
+            ARCH="$ARCH" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            mido_defconfig
+
+      # ============================================================
+      # VERIFY FINAL CONFIG
+      # ============================================================
+
+      - name: Verify final KernelSU configuration
         run: |
-          sed -i -E '/^CONFIG_KSU/d' arch/arm64/configs/mido_defconfig
-          printf '\nCONFIG_KSU=y\nCONFIG_KSU_MANUAL_HOOK=y\n' >> arch/arm64/configs/mido_defconfig
-          grep -E '^CONFIG_KSU' arch/arm64/configs/mido_defconfig
+          set -eux
+
+          cd "$GITHUB_WORKSPACE"
+
+          echo "========================================"
+          echo " KernelSU configuration"
+          echo "========================================"
+
+          grep -E \
+            '^(CONFIG_KSU|CONFIG_KSU_)' \
+            out/.config || true
+
+          echo
+          echo "========================================"
+          echo " Hook / Kprobe configuration"
+          echo "========================================"
+
+          grep -E \
+            '^(CONFIG_KPROBES|CONFIG_KRETPROBES|CONFIG_KSU.*HOOK)' \
+            out/.config || true
+
+          echo
+          echo "========================================"
+          echo " Important checks"
+          echo "========================================"
+
+          if grep -q '^CONFIG_KSU=y$' out/.config; then
+            echo "OK: CONFIG_KSU=y"
+          else
+            echo "ERROR: CONFIG_KSU is not enabled."
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' out/.config; then
+            echo
+            echo "ERROR:"
+            echo "CONFIG_KSU_MANUAL_HOOK=y detected."
+            echo "This build is NOT hookless."
+            exit 1
+          else
+            echo
+            echo "OK: CONFIG_KSU_MANUAL_HOOK is disabled."
+          fi
+
+      # ============================================================
+      # BUILD
+      # ============================================================
 
       - name: Build kernel
         run: |
+          set -eux
+
+          cd "$GITHUB_WORKSPACE"
+
+          export PATH="$GITHUB_WORKSPACE/clang/bin:/usr/lib/ccache:$PATH"
+
           export CC="ccache clang"
           export HOSTCC="ccache gcc"
-          make O=out ARCH=arm64 CC="$CC" HOSTCC="$HOSTCC" mido_defconfig
-          make -j$(nproc) O=out ARCH=arm64 CC="$CC" HOSTCC="$HOSTCC" LLVM=1 \
-            CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
 
-      - name: Package Image.gz-dtb
+          echo "========================================"
+          echo " Building kernel"
+          echo "========================================"
+
+          make \
+            -j"$(nproc)" \
+            O=out \
+            ARCH="$ARCH" \
+            CC="$CC" \
+            HOSTCC="$HOSTCC" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
+
+      # ============================================================
+      # SHOW BUILD OUTPUT
+      # ============================================================
+
+      - name: Inspect kernel output
         run: |
-          OUT="$PWD/out/arch/arm64/boot"
-          test -f "$OUT/Image"
-          gzip -n -9 -c "$OUT/Image" > "$OUT/Image.gz"
-          DTB=$(find "$OUT/dts" -name '*mido*.dtb' | head -1)
-          test -n "$DTB"
-          cat "$OUT/Image.gz" "$DTB" > "$OUT/Image.gz-dtb"
-          ls -lh "$OUT/Image.gz-dtb"
+          set -eux
 
-      - name: Upload
+          OUT="$GITHUB_WORKSPACE/out/arch/arm64/boot"
+
+          echo "=== boot output ==="
+          ls -lah "$OUT"
+
+          echo
+          echo "=== DTBs ==="
+          find "$OUT/dts" \
+            -type f \
+            -name '*.dtb' \
+            -print \
+            | head -100
+
+      # ============================================================
+      # CREATE IMAGE.GZ
+      # ============================================================
+
+      - name: Create Image.gz
+        run: |
+          set -eux
+
+          OUT="$GITHUB_WORKSPACE/out/arch/arm64/boot"
+
+          test -f "$OUT/Image"
+
+          echo "Compressing Image..."
+
+          gzip \
+            -n \
+            -9 \
+            -c "$OUT/Image" \
+            > "$OUT/Image.gz"
+
+          test -f "$OUT/Image.gz"
+
+          ls -lh \
+            "$OUT/Image" \
+            "$OUT/Image.gz"
+
+      # ============================================================
+      # FIND MIDO DTB
+      # ============================================================
+
+      - name: Find mido DTB
+        run: |
+          set -eux
+
+          OUT="$GITHUB_WORKSPACE/out/arch/arm64/boot"
+
+          echo "Searching for mido DTB..."
+
+          DTB="$(find "$OUT/dts" \
+            -type f \
+            \( \
+              -name '*mido*.dtb' \
+              -o \
+              -name 'msm8953-qrd-sku3*.dtb' \
+            \) \
+            | head -n1 || true)"
+
+          if [ -z "$DTB" ]; then
+            echo
+            echo "ERROR: mido DTB not found."
+            echo
+            echo "Available DTBs:"
+            find "$OUT/dts" \
+              -type f \
+              -name '*.dtb' \
+              -print \
+              | head -100
+
+            exit 1
+          fi
+
+          echo "DTB=$DTB" >> "$GITHUB_ENV"
+
+          echo
+          echo "Selected DTB:"
+          echo "$DTB"
+
+      # ============================================================
+      # CREATE IMAGE.GZ-DTB
+      # ============================================================
+
+      - name: Create Image.gz-dtb
+        run: |
+          set -eux
+
+          OUT="$GITHUB_WORKSPACE/out/arch/arm64/boot"
+
+          test -f "$OUT/Image.gz"
+          test -n "$DTB"
+          test -f "$DTB"
+
+          echo "========================================"
+          echo " Creating Image.gz-dtb"
+          echo "========================================"
+
+          cat \
+            "$OUT/Image.gz" \
+            "$DTB" \
+            > "$OUT/Image.gz-dtb"
+
+          test -f "$OUT/Image.gz-dtb"
+
+          echo
+          echo "=== Final kernel files ==="
+
+          ls -lh \
+            "$OUT/Image" \
+            "$OUT/Image.gz" \
+            "$OUT/Image.gz-dtb"
+
+      # ============================================================
+      # SAVE CCACHE STATS
+      # ============================================================
+
+      - name: Show ccache statistics
+        if: always()
+        run: |
+          ccache --show-stats || true
+
+      # ============================================================
+      # UPLOAD KERNEL
+      # ============================================================
+
+      - name: Upload Image.gz-dtb
         uses: actions/upload-artifact@v4
         with:
-          name: mido-ksu-hookless
+          name: mido-v1-oc-KSU-Next-Hookless
           path: out/arch/arm64/boot/Image.gz-dtb
+          if-no-files-found: error
+          compression-level: 0
+
+      # ============================================================
+      # UPLOAD CONFIG
+      # ============================================================
+
+      - name: Upload kernel config
+        uses: actions/upload-artifact@v4
+        with:
+          name: mido-v1-oc-KSU-Next-config
+          path: out/.config
+          if-no-files-found: error
+          compression-level: 9
