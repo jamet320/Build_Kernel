@@ -1,14 +1,10 @@
-name: Build v1-oc + KernelSU-Next Hookless (2)
+name: Build v1-oc + KernelSU-Next Hookless
 
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
-
-concurrency:
-  group: mido-v1-oc-kernel
-  cancel-in-progress: true
 
 jobs:
   build:
@@ -19,8 +15,6 @@ jobs:
       CROSS_COMPILE: aarch64-linux-gnu-
       CROSS_COMPILE_ARM32: arm-linux-gnueabi-
       CCACHE_DIR: ${{ github.workspace }}/.ccache
-      KBUILD_BUILD_USER: github-actions
-      KBUILD_BUILD_HOST: github
 
     steps:
 
@@ -31,133 +25,80 @@ jobs:
           ref: v1-oc
           fetch-depth: 1
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
-          set -eux
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential flex \
+          sudo apt-get install -y bc bison build-essential flex \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             libssl-dev libelf-dev python3 rsync unzip \
-            ccache device-tree-compiler coccinelle \
-            git curl gzip xz-utils
-          sudo rm -rf /var/lib/apt/lists/*
-
-      - name: Get Proton Clang commit
-        id: proton
-        run: |
-          set -eux
-          REPO="https://github.com/kdrag0n/proton-clang.git"
-          COMMIT="$(git ls-remote "$REPO" HEAD | awk '{print $1}')"
-          test -n "$COMMIT"
-          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
-          echo "Proton Clang: $COMMIT"
-
-      - name: Restore Proton Clang cache
-        id: clang-cache
-        uses: actions/cache@v4
-        with:
-          path: clang
-          key: proton-clang-${{ runner.os }}-${{ steps.proton.outputs.commit }}
-          restore-keys: |
-            proton-clang-${{ runner.os }}-
+            ccache device-tree-compiler git curl gzip xz-utils
 
       - name: Download Proton Clang
-        if: steps.clang-cache.outputs.cache-hit != 'true'
         run: |
-          set -eux
           git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+          echo "$PWD/clang/bin" >> $GITHUB_PATH
 
-      - name: Verify Proton Clang
+      - name: Integrate KernelSU-Next
         run: |
-          set -eux
-          test -x clang/bin/clang
-          clang/bin/clang --version | head -n 3
-          echo "$GITHUB_WORKSPACE/clang/bin" >> "$GITHUB_PATH"
-
-      - name: Prepare ccache
-        run: |
-          set -eux
-          mkdir -p "$CCACHE_DIR"
-          ccache --set-config=cache_dir="$CCACHE_DIR"
-          ccache --set-config=max_size=10G
-          ccache --set-config=compression=true
-          ccache --set-config=compression_level=6
-          ccache --set-config=sloppiness=file_macro,time_macros
-          ccache --show-config
-
-      - name: Restore ccache
-        id: ccache
-        uses: actions/cache@v4
-        with:
-          path: .ccache
-          key: ccache-mido-v1-oc-arm64-proton-${{ runner.os }}
-          restore-keys: |
-            ccache-mido-v1-oc-arm64-proton-
-
-      - name: Integrate KernelSU-Next Legacy
-        run: |
-          set -eux
-          cd "$GITHUB_WORKSPACE"
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
           test -e drivers/kernelsu
-          ls -la drivers/kernelsu
 
-      - name: Apply KernelSU-Next Manual Hooks
+      - name: Apply Manual Hooks
         run: |
           set -eux
-          cd "$GITHUB_WORKSPACE"
-          git clone --depth=1 https://github.com/devnoname120/kernelsu-coccinelle.git /tmp/ksu-cocci
-          chmod +x /tmp/ksu-cocci/patch.sh
-          /tmp/ksu-cocci/patch.sh
-          grep -n "ksu_handle_execveat" fs/exec.c
-          grep -n "ksu_handle_faccessat" fs/open.c
-          grep -n "ksu_handle_vfs_read" fs/read_write.c
-          grep -n "ksu_handle_stat" fs/stat.c
+          
+          # Patch 1: fs/exec.c
+          sed -i '/^static int do_execve(struct filename \*filename,/i #ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif' fs/exec.c
+          sed -i '/struct user_arg_ptr envp = { .ptr.native = __envp };/a #ifdef CONFIG_KSU\n\tksu_handle_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0);\n#endif' fs/exec.c
+          
+          # Patch 2: fs/open.c
+          sed -i '/^SYSCALL_DEFINE3(faccessat,/i #ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif' fs/open.c
+          sed -i '/unsigned int lookup_flags = LOOKUP_FOLLOW;/a #ifdef CONFIG_KSU\n\tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\n#endif' fs/open.c
+          
+          # Patch 3: fs/read_write.c
+          sed -i '/^SYSCALL_DEFINE3(read,/i #ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n#endif' fs/read_write.c
+          sed -i '/ssize_t ret = -EBADF;/a #ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, \&buf, \&count);\n#endif' fs/read_write.c
+          
+          # Patch 4: fs/stat.c
+          sed -i '/^#if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)/i #ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif' fs/stat.c
+          sed -i '/error = vfs_fstatat(dfd, filename, \&stat, flag);/i #ifdef CONFIG_KSU\n\tksu_handle_stat(\&dfd, \&filename, \&flag);\n#endif' fs/stat.c
+          
+          # Patch 5: kernel/reboot.c
+          sed -i '/^SYSCALL_DEFINE4(reboot,/i #ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif' kernel/reboot.c
+          sed -i '/^\tint ret = 0;/a #ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif' kernel/reboot.c
+          
+          # Verify
+          grep -c ksu_handle_execveat fs/exec.c
+          grep -c ksu_handle_faccessat fs/open.c
+          grep -c ksu_handle_sys_read fs/read_write.c
+          grep -c ksu_handle_stat fs/stat.c
+          grep -c ksu_handle_sys_reboot kernel/reboot.c
 
-      - name: Configure KernelSU-Next Hookless
+      - name: Configure defconfig
         run: |
-          set -eux
-          DEFCONFIG="arch/arm64/configs/mido_defconfig"
-          sed -i -E '/^CONFIG_KSU/d' "$DEFCONFIG"
-          printf '\nCONFIG_KSU=y\nCONFIG_KSU_MANUAL_HOOK=y\n' >> "$DEFCONFIG"
-
-      - name: Generate kernel config
-        run: |
-          set -eux
-          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
-          export CC="ccache clang"
-          export HOSTCC="ccache gcc"
-          make O=out ARCH="$ARCH" mido_defconfig
-          grep -q '^CONFIG_KSU=y$' out/.config
-          grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' out/.config
-          echo "KSU HOOKLESS OK"
+          sed -i -E '/^CONFIG_KSU/d' arch/arm64/configs/mido_defconfig
+          printf '\nCONFIG_KSU=y\nCONFIG_KSU_MANUAL_HOOK=y\n' >> arch/arm64/configs/mido_defconfig
 
       - name: Build kernel
         run: |
-          set -eux
-          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
           export CC="ccache clang"
           export HOSTCC="ccache gcc"
-          make -j"$(nproc)" O=out ARCH="$ARCH" \
-            CC="$CC" HOSTCC="$HOSTCC" LLVM=1 \
-            CROSS_COMPILE="$CROSS_COMPILE" \
-            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
+          make O=out ARCH=arm64 CC="$CC" HOSTCC="$HOSTCC" mido_defconfig
+          grep -E '^CONFIG_KSU' out/.config
+          make -j$(nproc) O=out ARCH=arm64 CC="$CC" HOSTCC="$HOSTCC" LLVM=1 \
+            CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
 
-      - name: Create Image.gz-dtb
+      - name: Package kernel
         run: |
-          set -eux
-          OUT="$GITHUB_WORKSPACE/out/arch/arm64/boot"
+          OUT="$PWD/out/arch/arm64/boot"
           gzip -n -9 -c "$OUT/Image" > "$OUT/Image.gz"
-          DTB="$(find "$OUT/dts" -type f -name '*mido*.dtb' -print | head -n 1)"
+          DTB=$(find "$OUT/dts" -name '*mido*.dtb' | head -1)
           test -n "$DTB"
           cat "$OUT/Image.gz" "$DTB" > "$OUT/Image.gz-dtb"
           ls -lh "$OUT/Image.gz-dtb"
 
-      - name: Upload kernel
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: mido-v1-oc-KernelSU-Next-Hookless-2
-          if-no-files-found: error
-          compression-level: 0
+          name: kernel-ksu-hookless
           path: out/arch/arm64/boot/Image.gz-dtb
