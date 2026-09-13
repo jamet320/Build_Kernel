@@ -1,10 +1,14 @@
-name: Build v1-oc + KernelSU-Next Hookless 2
+name: Build v1-oc + KernelSU-Next Hookless (2)
 
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: mido-v1-oc-kernel
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -46,45 +50,46 @@ jobs:
       - name: Apply Manual Hooks
         run: |
           set -eux
-          
-          # Patch 1: fs/exec.c
+          cd "$GITHUB_WORKSPACE"
+
+          # fs/exec.c
           sed -i '/^static int do_execve(struct filename \*filename,/i #ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n#endif' fs/exec.c
           sed -i '/struct user_arg_ptr envp = { .ptr.native = __envp };/a #ifdef CONFIG_KSU\n\tksu_handle_execveat((int *)AT_FDCWD, \&filename, \&argv, \&envp, 0);\n#endif' fs/exec.c
-          
-          # Patch 2: fs/open.c
-          sed -i '/^SYSCALL_DEFINE3(faccessat,/i #ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif' fs/open.c
-          sed -i '/unsigned int lookup_flags = LOOKUP_FOLLOW;/a #ifdef CONFIG_KSU\n\tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\n#endif' fs/open.c
-          
-          # Patch 3: fs/read_write.c
+
+          # fs/open.c
+          sed -i '1i #ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif\n' fs/open.c
+          sed -i '/^static int do_faccessat(int dfd, const char __user \*filename, int mode)$/,/^{$/s/^{$/{\n#ifdef CONFIG_KSU\n\tksu_handle_faccessat(\&dfd, \&filename, \&mode, NULL);\n#endif/' fs/open.c
+
+          # fs/read_write.c
           sed -i '/^SYSCALL_DEFINE3(read,/i #ifdef CONFIG_KSU\nextern bool ksu_vfs_read_hook __read_mostly;\nextern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n#endif' fs/read_write.c
-          sed -i '/ssize_t ret = -EBADF;/a #ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, \&buf, \&count);\n#endif' fs/read_write.c
-          
-          # Patch 4: fs/stat.c
+          sed -i '/^SYSCALL_DEFINE3(read,/,/^{$/s/^{$/{\n#ifdef CONFIG_KSU\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_sys_read(fd, \&buf, \&count);\n#endif/' fs/read_write.c
+
+          # fs/stat.c
           sed -i '/^#if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)/i #ifdef CONFIG_KSU\n__attribute__((hot))\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif' fs/stat.c
-          sed -i '/error = vfs_fstatat(dfd, filename, \&stat, flag);/i #ifdef CONFIG_KSU\n\tksu_handle_stat(\&dfd, \&filename, \&flag);\n#endif' fs/stat.c
-          
-          # Patch 5: kernel/reboot.c
+          sed -i '/^static int vfs_fstatat(int dfd, const char __user \*filename, struct kstat \*stat,$/,/^{$/s/^{$/{\n#ifdef CONFIG_KSU\n\tksu_handle_stat(\&dfd, \&filename, \&flag);\n#endif/' fs/stat.c
+
+          # kernel/reboot.c
           sed -i '/^SYSCALL_DEFINE4(reboot,/i #ifdef CONFIG_KSU\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif' kernel/reboot.c
-          sed -i '/^\tint ret = 0;/a #ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif' kernel/reboot.c
-          
-          # Verify
-          grep -c ksu_handle_execveat fs/exec.c
-          grep -c ksu_handle_faccessat fs/open.c
-          grep -c ksu_handle_sys_read fs/read_write.c
-          grep -c ksu_handle_stat fs/stat.c
-          grep -c ksu_handle_sys_reboot kernel/reboot.c
+          sed -i '/^SYSCALL_DEFINE4(reboot,/,/^{$/s/^{$/{\n#ifdef CONFIG_KSU\n\tksu_handle_sys_reboot(magic1, magic2, cmd, \&arg);\n#endif/' kernel/reboot.c
+
+          echo "=== Verify hooks ==="
+          grep -n "ksu_handle_execveat" fs/exec.c
+          grep -n "ksu_handle_faccessat" fs/open.c
+          grep -n "ksu_handle_sys_read" fs/read_write.c
+          grep -n "ksu_handle_stat" fs/stat.c
+          grep -n "ksu_handle_sys_reboot" kernel/reboot.c
 
       - name: Configure defconfig
         run: |
           sed -i -E '/^CONFIG_KSU/d' arch/arm64/configs/mido_defconfig
           printf '\nCONFIG_KSU=y\nCONFIG_KSU_MANUAL_HOOK=y\n' >> arch/arm64/configs/mido_defconfig
+          grep -E '^CONFIG_KSU' arch/arm64/configs/mido_defconfig
 
       - name: Build kernel
         run: |
           export CC="ccache clang"
           export HOSTCC="ccache gcc"
           make O=out ARCH=arm64 CC="$CC" HOSTCC="$HOSTCC" mido_defconfig
-          grep -E '^CONFIG_KSU' out/.config
           make -j$(nproc) O=out ARCH=arm64 CC="$CC" HOSTCC="$HOSTCC" LLVM=1 \
             CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32"
 
@@ -97,8 +102,8 @@ jobs:
           cat "$OUT/Image.gz" "$DTB" > "$OUT/Image.gz-dtb"
           ls -lh "$OUT/Image.gz-dtb"
 
-      - name: Upload
+      - name: Upload kernel
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-ksu-hookless
+          name: mido-ksu-hookless
           path: out/arch/arm64/boot/Image.gz-dtb
