@@ -1,4 +1,4 @@
-name: Build v1-oc + KernelSU-Next Hookless 2
+name: Build v1-oc + KernelSU-Next Hookless
 
 on:
   workflow_dispatch:
@@ -148,7 +148,7 @@ jobs:
             ccache-mido-v1-oc-arm64-proton-
 
       # ============================================================
-      # KERNELSU-NEXT
+      # KERNELSU-NEXT (HOOKLESS / MANUAL VFS HOOKS)
       # ============================================================
 
       - name: Integrate KernelSU-Next Legacy
@@ -198,6 +198,10 @@ jobs:
           echo "=== Remove conflicting KSU hook modes ==="
 
           sed -i \
+            -E '/^CONFIG_KSU_WITH_KPROBES=/d' \
+            "$DEFCONFIG"
+
+          sed -i \
             -E '/^CONFIG_KSU_KPROBE_HOOK=/d' \
             "$DEFCONFIG"
 
@@ -218,7 +222,9 @@ jobs:
 
           cat >> "$DEFCONFIG" <<'EOF'
 
+          # KernelSU Next - Hookless (Manual VFS Hooks)
           CONFIG_KSU=y
+          CONFIG_KSU_WITH_KPROBES=n
           CONFIG_KSU_LSM_SECURITY_HOOKS=y
           EOF
 
@@ -258,6 +264,11 @@ jobs:
           echo "================================================"
           echo "VERIFY HOOKLESS"
           echo "================================================"
+
+          if grep -q '^CONFIG_KSU_WITH_KPROBES=y$' out/.config; then
+            echo "ERROR: KSU KPROBES HOOK ENABLED"
+            exit 1
+          fi
 
           if grep -q '^CONFIG_KSU_KPROBE_HOOK=y$' out/.config; then
             echo "ERROR: KSU KPROBE HOOK ENABLED"
