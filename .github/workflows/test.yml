@@ -1,0 +1,486 @@
+name: Universal mido Kernel A10-A13
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_branch:
+        description: "Base kernel branch"
+        required: true
+        default: "v1"
+
+      build_type:
+        description: "Build mode"
+        required: true
+        type: choice
+        options:
+          - baseline
+          - analyze
+        default: "analyze"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mido-universal-a10-a13
+  cancel-in-progress: true
+
+env:
+  ARCH: arm64
+  SUBARCH: arm64
+  CLANG_DIR: ${{ github.workspace }}/clang
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  OUT_DIR: ${{ github.workspace }}/out
+
+  # Reference branches
+  A10_BRANCH: lineage-17.1
+  A11_BRANCH: lineage-18.1
+  A12_BRANCH: lineage-19.1
+  A13_BRANCH: lineage-20.0
+
+jobs:
+
+  build:
+    name: Universal mido A10-A13
+    runs-on: ubuntu-22.04
+
+    steps:
+
+      # ---------------------------------------------------------
+      # CHECKOUT BASE
+      # ---------------------------------------------------------
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+        with:
+          repository: jamet320/android_kernel_xiaomi_mido
+          ref: ${{ inputs.base_branch }}
+          fetch-depth: 0
+
+      # ---------------------------------------------------------
+      # APT DEPENDENCIES
+      # ---------------------------------------------------------
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            clang \
+            flex \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            libelf-dev \
+            libssl-dev \
+            libncurses5-dev \
+            python3 \
+            python3-pip \
+            rsync \
+            unzip \
+            zip \
+            device-tree-compiler \
+            git \
+            curl \
+            wget
+
+      # ---------------------------------------------------------
+      # CCACHE
+      # ---------------------------------------------------------
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: mido-ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            mido-ccache-${{ runner.os }}-${{ github.ref_name }}-
+            mido-ccache-${{ runner.os }}-
+
+      - name: Configure ccache
+        run: |
+          mkdir -p "$CCACHE_DIR"
+
+          ccache --set-config=cache_dir="$CCACHE_DIR"
+          ccache --set-config=max_size=8G
+          ccache --set-config=compression=true
+
+          echo "CCACHE_DIR=$CCACHE_DIR" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------
+      # PROTON CLANG
+      # ---------------------------------------------------------
+      - name: Cache Proton Clang
+        id: clang-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CLANG_DIR }}
+          key: proton-clang-kdrag0n-${{ runner.os }}-v1
+
+      - name: Download Proton Clang
+        if: steps.clang-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 \
+            https://github.com/kdrag0n/proton-clang \
+            "$CLANG_DIR"
+
+      # ---------------------------------------------------------
+      # TOOLCHAIN
+      # ---------------------------------------------------------
+      - name: Configure toolchain
+        run: |
+          echo "$CLANG_DIR/bin" >> "$GITHUB_PATH"
+
+          echo "CLANG_PATH=$CLANG_DIR/bin/clang" >> "$GITHUB_ENV"
+          echo "LLVM_PATH=$CLANG_DIR/bin" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------
+      # BASIC SOURCE INFORMATION
+      # ---------------------------------------------------------
+      - name: Kernel information
+        run: |
+          echo "========================================"
+          echo "BASE BRANCH"
+          echo "========================================"
+
+          git branch --show-current
+          git rev-parse HEAD
+          git describe --always --dirty
+
+          echo
+          echo "Kernel version:"
+          make kernelversion
+
+          echo
+          echo "Remotes:"
+          git remote -v
+
+      # ---------------------------------------------------------
+      # FETCH REFERENCE BRANCHES
+      # ---------------------------------------------------------
+      - name: Fetch Android reference branches
+        run: |
+          git fetch origin \
+            "$A10_BRANCH" \
+            "$A11_BRANCH" \
+            "$A12_BRANCH" \
+            "$A13_BRANCH" \
+            --depth=1
+
+      # ---------------------------------------------------------
+      # CREATE ANALYSIS DIRECTORY
+      # ---------------------------------------------------------
+      - name: Prepare analysis directory
+        run: |
+          mkdir -p analysis
+          mkdir -p patches
+
+      # ---------------------------------------------------------
+      # BRANCH ANALYSIS
+      # ---------------------------------------------------------
+      - name: Analyze Android branches
+        run: |
+          set -e
+
+          BASE="$(git rev-parse HEAD)"
+
+          {
+            echo "=============================================="
+            echo "mido UNIVERSAL KERNEL COMPATIBILITY ANALYSIS"
+            echo "=============================================="
+            echo
+            echo "Base:"
+            echo "$BASE"
+            echo
+            echo "Kernel:"
+            make kernelversion
+            echo
+          } | tee analysis/compatibility-report.txt
+
+          analyze_branch() {
+            NAME="$1"
+            BRANCH="$2"
+
+            echo
+            echo "==============================================" | tee -a analysis/compatibility-report.txt
+            echo "$NAME - $BRANCH" | tee -a analysis/compatibility-report.txt
+            echo "==============================================" | tee -a analysis/compatibility-report.txt
+
+            REF="origin/$BRANCH"
+
+            echo "Reference commit:" | tee -a analysis/compatibility-report.txt
+            git rev-parse "$REF" | tee -a analysis/compatibility-report.txt
+
+            echo | tee -a analysis/compatibility-report.txt
+            echo "Changed files:" | tee -a analysis/compatibility-report.txt
+
+            git diff --stat "$BASE" "$REF" \
+              | tee "analysis/${NAME}-diff-stat.txt" \
+              | tee -a analysis/compatibility-report.txt
+
+            echo | tee -a analysis/compatibility-report.txt
+            echo "Kernel-relevant changes:" | tee -a analysis/compatibility-report.txt
+
+            git diff --name-status "$BASE" "$REF" \
+              | grep -E \
+              '^(A|M|D|R).*(^|/)(arch/|drivers/|fs/|include/|ipc/|kernel/|mm/|net/|security/|sound/|techpack/)' \
+              > "analysis/${NAME}-kernel-files.txt" || true
+
+            cat "analysis/${NAME}-kernel-files.txt" \
+              | tee -a analysis/compatibility-report.txt || true
+
+            echo | tee -a analysis/compatibility-report.txt
+            echo "Commit summary:" | tee -a analysis/compatibility-report.txt
+
+            git log --oneline --decorate --no-merges \
+              "$BASE..$REF" \
+              | head -200 \
+              | tee "analysis/${NAME}-commits.txt" \
+              | tee -a analysis/compatibility-report.txt
+          }
+
+          analyze_branch "A10" "$A10_BRANCH"
+          analyze_branch "A11" "$A11_BRANCH"
+          analyze_branch "A12" "$A12_BRANCH"
+          analyze_branch "A13" "$A13_BRANCH"
+
+      # ---------------------------------------------------------
+      # ANDROID CONFIG ANALYSIS
+      # ---------------------------------------------------------
+      - name: Analyze kernel configs
+        run: |
+          set +e
+
+          mkdir -p analysis/configs
+
+          echo "Searching for Android-related config symbols..."
+
+          for BRANCH in \
+            "$A10_BRANCH" \
+            "$A11_BRANCH" \
+            "$A12_BRANCH" \
+            "$A13_BRANCH"
+          do
+            NAME="${BRANCH//./_}"
+
+            echo
+            echo "========== $BRANCH =========="
+
+            git show \
+              "origin/$BRANCH:arch/arm64/configs/mido_defconfig" \
+              > "analysis/configs/${NAME}-mido_defconfig" 2>/dev/null
+
+            if [ -s "analysis/configs/${NAME}-mido_defconfig" ]; then
+              grep -E \
+                'CONFIG_(ANDROID|ASHMEM|BINDER|CGROUP|NAMESPACE|SECCOMP|SELINUX|DMABUF|ION|F2FS|FS_ENCRYPTION|OVERLAY_FS|DM_VERITY|BPF|PSI)' \
+                "analysis/configs/${NAME}-mido_defconfig" \
+                > "analysis/configs/${NAME}-android-config.txt" || true
+            fi
+          done
+
+          echo
+          echo "Current base config:"
+          grep -E \
+            'CONFIG_(ANDROID|ASHMEM|BINDER|CGROUP|NAMESPACE|SECCOMP|SELINUX|DMABUF|ION|F2FS|FS_ENCRYPTION|OVERLAY_FS|DM_VERITY|BPF|PSI)' \
+            arch/arm64/configs/mido_defconfig \
+            > analysis/configs/base-android-config.txt || true
+
+      # ---------------------------------------------------------
+      # GENERATE CONFIG FROM BASE
+      # ---------------------------------------------------------
+      - name: Generate mido defconfig
+        run: |
+          mkdir -p "$OUT_DIR"
+
+          make O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            mido_defconfig
+
+      # ---------------------------------------------------------
+      # CONFIG COMPATIBILITY CHECK
+      # ---------------------------------------------------------
+      - name: Check base configuration
+        run: |
+          {
+            echo "========================================"
+            echo "BASE CONFIGURATION"
+            echo "========================================"
+
+            grep -E \
+              'CONFIG_(ANDROID|ASHMEM|ANDROID_BINDER|CGROUP|NAMESPACE|SECCOMP|SELINUX|DMABUF|ION|F2FS|FS_ENCRYPTION|OVERLAY_FS|DM_VERITY|BPF|PSI)' \
+              "$OUT_DIR/.config" || true
+
+            echo
+            echo "Kernel version:"
+            grep '^CONFIG_LOCALVERSION=' "$OUT_DIR/.config" || true
+
+            echo
+            echo "Architecture:"
+            grep '^CONFIG_ARM64=' "$OUT_DIR/.config" || true
+
+          } | tee analysis/final-config.txt
+
+      # ---------------------------------------------------------
+      # BUILD
+      # ---------------------------------------------------------
+      - name: Build kernel
+        run: |
+          set -e
+
+          export PATH="$CLANG_DIR/bin:$PATH"
+
+          export CC="ccache clang"
+          export HOSTCC="ccache gcc"
+
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+
+          export LLVM=1
+          export LLVM_IAS=1
+
+          export KBUILD_BUILD_USER="GitHub-Actions"
+          export KBUILD_BUILD_HOST="mido-universal"
+
+          make O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            CC="ccache clang" \
+            HOSTCC="ccache gcc" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            -j"$(nproc)" \
+            Image.gz-dtb
+
+      # ---------------------------------------------------------
+      # VERIFY OUTPUT
+      # ---------------------------------------------------------
+      - name: Verify kernel output
+        run: |
+          set -e
+
+          IMAGE="$OUT_DIR/arch/arm64/boot/Image.gz-dtb"
+
+          if [ ! -f "$IMAGE" ]; then
+            echo "ERROR: Image.gz-dtb was not generated."
+            exit 1
+          fi
+
+          echo "========================================"
+          echo "KERNEL SUCCESSFULLY BUILT"
+          echo "========================================"
+
+          ls -lh "$IMAGE"
+
+          file "$IMAGE"
+
+          echo
+          echo "Kernel version:"
+          make O="$OUT_DIR" kernelversion
+
+          echo
+          echo "ccache statistics:"
+          ccache -s
+
+      # ---------------------------------------------------------
+      # BUILD METADATA
+      # ---------------------------------------------------------
+      - name: Create build information
+        run: |
+          mkdir -p artifact
+
+          cp "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" \
+            artifact/Image.gz-dtb
+
+          cp "$OUT_DIR/.config" \
+            artifact/mido.config
+
+          cp analysis/compatibility-report.txt \
+            artifact/compatibility-report.txt
+
+          cp analysis/final-config.txt \
+            artifact/final-config.txt
+
+          cp -r analysis/configs \
+            artifact/
+
+          {
+            echo "mido Universal Kernel"
+            echo
+            echo "Base repository:"
+            echo "https://github.com/jamet320/android_kernel_xiaomi_mido"
+            echo
+            echo "Base branch:"
+            echo "${{ inputs.base_branch }}"
+            echo
+            echo "Base commit:"
+            git rev-parse HEAD
+            echo
+            echo "Kernel version:"
+            make O="$OUT_DIR" kernelversion
+            echo
+            echo "Reference branches:"
+            echo "A10 = $A10_BRANCH"
+            echo "A11 = $A11_BRANCH"
+            echo "A12 = $A12_BRANCH"
+            echo "A13 = $A13_BRANCH"
+            echo
+            echo "Build date:"
+            date -u
+          } > artifact/build-info.txt
+
+      # ---------------------------------------------------------
+      # PACKAGE
+      # ---------------------------------------------------------
+      - name: Package kernel
+        run: |
+          cd artifact
+
+          zip -9 \
+            ../mido-universal-a10-a13.zip \
+            Image.gz-dtb \
+            mido.config \
+            build-info.txt \
+            compatibility-report.txt \
+            final-config.txt
+
+      # ---------------------------------------------------------
+      # UPLOAD ARTIFACT
+      # ---------------------------------------------------------
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mido-universal-a10-a13
+          path: |
+            mido-universal-a10-a13.zip
+            artifact/
+          if-no-files-found: error
+          retention-days: 30
+
+      # ---------------------------------------------------------
+      # SUMMARY
+      # ---------------------------------------------------------
+      - name: Build summary
+        run: |
+          {
+            echo "## mido Universal A10-A13"
+            echo
+            echo "### Base"
+            echo "\`${{ inputs.base_branch }}\`"
+            echo
+            echo "### Reference branches"
+            echo "- A10: \`$A10_BRANCH\`"
+            echo "- A11: \`$A11_BRANCH\`"
+            echo "- A12: \`$A12_BRANCH\`"
+            echo "- A13: \`$A13_BRANCH\`"
+            echo
+            echo "### Kernel"
+            echo "\`$(make O="$OUT_DIR" kernelversion)\`"
+            echo
+            echo "### Output"
+            echo "\`Image.gz-dtb\`"
+            echo
+            echo "### Important"
+            echo "This first build is a BASELINE/ANALYSIS build."
+            echo "Reference branches are analyzed but NOT blindly merged."
+            echo
+            echo "Next step:"
+            echo "Use compatibility report to select safe forward-port patches."
+          } >> "$GITHUB_STEP_SUMMARY"
