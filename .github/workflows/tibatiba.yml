@@ -1,0 +1,447 @@
+name: Build Universal mido A10-A13 - tiba2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mido-universal-a10-a13
+  cancel-in-progress: true
+
+env:
+  ARCH: arm64
+  SUBARCH: arm64
+
+  REPO: jamet320/android_kernel_xiaomi_mido
+
+  BASE_BRANCH: v1
+  A10_BRANCH: lineage-17.1-4.9
+  A11_BRANCH: lineage-18.1
+  A12_BRANCH: lineage-19.1
+  A13_BRANCH: lineage-20.0
+
+  CLANG_DIR: ${{ github.workspace }}/clang
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  OUT_DIR: ${{ github.workspace }}/out
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+
+      # ============================================================
+      # CHECKOUT v1
+      # ============================================================
+
+      - name: Checkout v1
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPO }}
+          ref: ${{ env.BASE_BRANCH }}
+          fetch-depth: 0
+
+      # ============================================================
+      # DEPENDENCIES
+      # ============================================================
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            flex \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            libelf-dev \
+            libssl-dev \
+            libncurses5-dev \
+            python3 \
+            rsync \
+            unzip \
+            zip \
+            device-tree-compiler \
+            git \
+            curl \
+            wget
+
+      # ============================================================
+      # CCACHE
+      # ============================================================
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: mido-universal-ccache-${{ runner.os }}-${{ hashFiles('Makefile', 'arch/arm64/configs/mido_defconfig') }}
+          restore-keys: |
+            mido-universal-ccache-${{ runner.os }}-
+
+      - name: Configure ccache
+        run: |
+          mkdir -p "$CCACHE_DIR"
+
+          ccache --set-config=cache_dir="$CCACHE_DIR"
+          ccache --set-config=max_size=8G
+          ccache --set-config=compression=true
+
+      # ============================================================
+      # PROTON CLANG
+      # ============================================================
+
+      - name: Restore Proton Clang
+        uses: actions/cache@v4
+        id: clang-cache
+        with:
+          path: ${{ env.CLANG_DIR }}
+          key: proton-clang-kdrag0n-v1
+
+      - name: Clone Proton Clang
+        if: steps.clang-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 \
+            https://github.com/kdrag0n/proton-clang \
+            "$CLANG_DIR"
+
+      - name: Setup Clang
+        run: |
+          echo "$CLANG_DIR/bin" >> "$GITHUB_PATH"
+
+      # ============================================================
+      # FETCH ALL BRANCHES
+      # ============================================================
+
+      - name: Fetch kernel branches
+        run: |
+          set -e
+
+          git fetch origin \
+            "$A10_BRANCH" \
+            "$A11_BRANCH" \
+            "$A12_BRANCH" \
+            "$A13_BRANCH" \
+            --depth=1
+
+          echo "Branches fetched:"
+          git branch -r
+
+      # ============================================================
+      # VERIFY v1 IS BASED ON A10
+      # ============================================================
+
+      - name: Verify v1 / A10 relationship
+        run: |
+          set -e
+
+          echo "v1:"
+          git rev-parse HEAD
+
+          echo
+          echo "A10:"
+          git rev-parse "origin/$A10_BRANCH"
+
+          echo
+          echo "Checking history relationship..."
+
+          if git merge-base --is-ancestor \
+              "origin/$A10_BRANCH" \
+              HEAD; then
+            echo "OK: lineage-17.1-4.9 is an ancestor of v1."
+          else
+            echo "WARNING: A10 branch is not detected as an ancestor."
+            echo "Continuing, but this relationship must be inspected."
+          fi
+
+      # ============================================================
+      # RECORD BASE VERSION
+      # ============================================================
+
+      - name: Record base kernel version
+        run: |
+          echo "BASE_VERSION=$(make kernelversion)" >> "$GITHUB_ENV"
+
+          echo "Base kernel:"
+          make kernelversion
+
+      # ============================================================
+      # CREATE WORKING BRANCH
+      # ============================================================
+
+      - name: Create universal branch
+        run: |
+          git checkout -b ci/universal-a10-a13
+
+          git config user.name "github-actions"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # ============================================================
+      # A10 → A11
+      # ============================================================
+
+      - name: Forward-port A10 → A11
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "A10 → A11"
+          echo "=========================================="
+
+          git merge \
+            --no-ff \
+            --no-edit \
+            "origin/$A11_BRANCH"
+
+          echo
+          echo "A11 merge successful."
+
+          make kernelversion
+
+      # ============================================================
+      # A11 → A12
+      # ============================================================
+
+      - name: Forward-port A11 → A12
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "A11 → A12"
+          echo "=========================================="
+
+          git merge \
+            --no-ff \
+            --no-edit \
+            "origin/$A12_BRANCH"
+
+          echo
+          echo "A12 merge successful."
+
+          make kernelversion
+
+      # ============================================================
+      # A12 → A13
+      # ============================================================
+
+      - name: Forward-port A12 → A13
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "A12 → A13"
+          echo "=========================================="
+
+          git merge \
+            --no-ff \
+            --no-edit \
+            "origin/$A13_BRANCH"
+
+          echo
+          echo "A13 merge successful."
+
+          make kernelversion
+
+      # ============================================================
+      # SHOW FINAL TREE
+      # ============================================================
+
+      - name: Show final source state
+        run: |
+          echo "=========================================="
+          echo "FINAL UNIVERSAL SOURCE"
+          echo "=========================================="
+
+          echo
+          echo "Commit:"
+          git rev-parse HEAD
+
+          echo
+          echo "Kernel version:"
+          make kernelversion
+
+          echo
+          echo "Recent merges:"
+          git log --oneline --decorate -12
+
+          echo
+          echo "Working tree:"
+          git status --short
+
+      # ============================================================
+      # CONFIG
+      # ============================================================
+
+      - name: Prepare kernel configuration
+        run: |
+          set -e
+
+          rm -rf "$OUT_DIR"
+          mkdir -p "$OUT_DIR"
+
+          make O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            mido_defconfig
+
+      # ============================================================
+      # BUILD
+      # ============================================================
+
+      - name: Build universal kernel
+        run: |
+          set -e
+
+          export PATH="$CLANG_DIR/bin:$PATH"
+
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+
+          export LLVM=1
+          export LLVM_IAS=1
+
+          export KBUILD_BUILD_USER="GitHub-Actions"
+          export KBUILD_BUILD_HOST="mido-universal-a10-a13"
+
+          make O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            CC="ccache clang" \
+            HOSTCC="ccache gcc" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            -j"$(nproc)" \
+            Image.gz-dtb
+
+      # ============================================================
+      # VERIFY IMAGE
+      # ============================================================
+
+      - name: Verify kernel image
+        run: |
+          set -e
+
+          IMAGE="$OUT_DIR/arch/arm64/boot/Image.gz-dtb"
+
+          if [ ! -f "$IMAGE" ]; then
+            echo "ERROR: Image.gz-dtb was not produced."
+            exit 1
+          fi
+
+          echo "=========================================="
+          echo "BUILD SUCCESS"
+          echo "=========================================="
+
+          ls -lh "$IMAGE"
+
+          echo
+          echo "Kernel version:"
+          make O="$OUT_DIR" kernelversion
+
+          echo
+          echo "Image:"
+          file "$IMAGE"
+
+          echo
+          echo "ccache:"
+          ccache -s
+
+      # ============================================================
+      # CREATE REPORT
+      # ============================================================
+
+      - name: Generate build report
+        if: always()
+        run: |
+          mkdir -p artifact
+
+          {
+            echo "mido Universal A10-A13"
+            echo
+            echo "Base branch: $BASE_BRANCH"
+            echo "A10 reference: $A10_BRANCH"
+            echo "A11: $A11_BRANCH"
+            echo "A12: $A12_BRANCH"
+            echo "A13: $A13_BRANCH"
+            echo
+            echo "Final commit:"
+            git rev-parse HEAD 2>/dev/null || true
+            echo
+            echo "Kernel version:"
+            make kernelversion 2>/dev/null || true
+            echo
+            echo "Git status:"
+            git status --short 2>/dev/null || true
+            echo
+            echo "Recent history:"
+            git log --oneline --decorate -15 2>/dev/null || true
+          } > artifact/build-info.txt
+
+          if [ -f "$OUT_DIR/.config" ]; then
+            cp "$OUT_DIR/.config" artifact/mido.config
+          fi
+
+          if [ -f "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" ]; then
+            cp "$OUT_DIR/arch/arm64/boot/Image.gz-dtb" \
+              artifact/Image.gz-dtb
+          fi
+
+          git diff \
+            "origin/$A10_BRANCH" \
+            HEAD \
+            --stat \
+            > artifact/a10-to-final.stat 2>/dev/null || true
+
+      # ============================================================
+      # UPLOAD ARTIFACT
+      # ============================================================
+
+      - name: Upload universal kernel
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mido-universal-a10-a13
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 30
+
+      # ============================================================
+      # UPLOAD FAILURE STATE
+      # ============================================================
+
+      - name: Upload conflict/debug information
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mido-universal-a10-a13-failure
+          path: |
+            artifact/
+            .git/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # ============================================================
+      # SUMMARY
+      # ============================================================
+
+      - name: GitHub Summary
+        if: always()
+        run: |
+          {
+            echo "# mido Universal A10-A13"
+            echo
+            echo "### Forward-port chain"
+            echo
+            echo "\`v1 → lineage-18.1 → lineage-19.1 → lineage-20.0\`"
+            echo
+            echo "### Target"
+            echo
+            echo "\`4.9.248 → 4.9.295 → 4.9.326 → 4.9.337\`"
+            echo
+            echo "No automatic ours/theirs conflict resolution was used."
+            echo
+            echo "If a merge conflicts, the workflow stops instead of silently"
+            echo "overwriting custom v1 changes."
+          } >> "$GITHUB_STEP_SUMMARY"
